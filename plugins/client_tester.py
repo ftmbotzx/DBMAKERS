@@ -186,18 +186,16 @@ async def test_spotify_clients(client: Client, message: Message):
     response_text = f"🧪 **Spotify Clients Test Results**\n"
     response_text += f"📊 **Tested {len(results)} clients with {num_test_requests} requests each**\n\n"
 
-    # Get current stats from manager
-    current_stats = manager.get_client_status()
-
     total_valid = 0
     total_invalid = 0
     total_rate_limited = 0
 
-    for client_id, result in results.items():
-        short_id = result['client_id_short']
-        cred_status = result['credential_test']['status']
-        successful_reqs = result['total_successful_requests']
-        avg_time = result['avg_response_time']
+    for result in results:
+        client_id = result['client_id']
+        short_id = client_id[:8]
+        cred_status = result['credentials_status']
+        successful_reqs = result.get('successful_requests', 0)
+        avg_time = result.get('avg_response_time', 0)
 
         # Status emoji
         if cred_status == 'valid':
@@ -231,8 +229,7 @@ async def test_spotify_clients(client: Client, message: Message):
             if current_requests > 0:
                 response_text += f" | Session: {current_requests}"
         elif cred_status == 'rate_limited':
-            retry_after = result['credential_test'].get('retry_after', 'unknown')
-            response_text += f"Rate Limited (retry: {retry_after}s)"
+            response_text += "Rate Limited"
         elif cred_status == 'invalid':
             response_text += "Invalid Credentials"
         else:
