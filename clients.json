@@ -1,0 +1,68 @@
+{
+  "clients": [
+    {
+      "client_id": "5a7e9f41e1124e839e39a1b5ad71417a",
+      "client_secret": "463e9c5ddf4e4b8d8a08eb596e81fce5"
+    },
+    {
+      "client_id": "8361260e407b41cf830dbaeb47e4065a",
+      "client_secret": "ef93481f760a40358aae44759d47740e"
+    },
+    {
+      "client_id": "87627be532e7479d89fd8d544ad277f4",
+      "client_secret": "b9eef2730c174bbe87c8ac6dd1091781"
+    },
+    {
+      "client_id": "97d40c2c7b7948589df58d838b8e9e68",
+      "client_secret": "c6e8b0da7751415e848a97f309bc057d"
+    },
+    {
+      "client_id": "f4073094a91849bb9153c0b67b574806",
+      "client_secret": "3c7b577a92174fafb522039a52b2bc36"
+    },
+    {
+      "client_id": "5561376fd0234838863a8c3a6cbb0865",
+      "client_secret": "fa12e995f56c48a28e28fb056e041d18"
+    },
+    {
+      "client_id": "87c0e80d2698480b8130e1940949e438",
+      "client_secret": "3c58dd0817b04641a4e0a918e4c7fe2c"
+    },
+    {
+      "client_id": "8afb35368d464b5ba5615fbaeae7ed20",
+      "client_secret": "f317c8085a81406bb6244c8c3182f283"
+    },
+    {
+      "client_id": "46dccaad9e6b46c396bf9d140325c2fb",
+      "client_secret": "3b6b00a5d5454a0888c2098b628ab5f8"
+    },
+    {
+      "client_id": "a8c78174e7524e109d669ee67bbad3f2",
+      "client_secret": "3074289c88ac4071bef5c11ca210a8e5"
+    },
+    {
+      "client_id": "c41bf373ffe242d39a57165594509496",
+      "client_secret": "3bf1a596e9554b8691228559b3509755"
+    },
+    {
+      "client_id": "19faa319e52145a38d587a0d58d78cbf",
+      "client_secret": "b6d5070d56c4498ab589b3073af80184"
+    },
+    {
+      "client_id": "47cad2ea2d3a44f8a02d5505dfc6ab17",
+      "client_secret": "2d1d8e3554034d4d8b47e172b23e63f4"
+    },
+    {
+      "client_id": "47c5287fc08e43fbbe859390b0c15edf",
+      "client_secret": "d4528133dd2b43098f6016f67c2515fd"
+    },
+    {
+      "client_id": "ea37765cd0bf43eeae96ad8b7c8c8a61",
+      "client_secret": "120fa7a8fc9d4c8b855826795c243ae7"
+    },
+    {
+      "client_id": "d52e171b692e43f88ea267071f0e838d",
+      "client_secret": "b5ab6396e98545e9bc2e023974d964cc"
+    }
+  ]
+}

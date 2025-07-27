@@ -1,0 +1,25 @@
+modules = ["python-3.10", "bash"]
+run = "python bot.py"
+
+[nix]
+channel = "stable-25_05"
+packages = ["ffmpeg-full", "gitFull", "imagemagickBig", "playwright-driver"]
+
+[deployment]
+run = ["sh", "-c", "python bot.py"]
+
+[workflows]
+runButton = "Bot"
+
+[[workflows.workflow]]
+name = "Bot"
+author = 45593882
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python bot.py"
+
+[[ports]]
+localPort = 8080
+externalPort = 80
