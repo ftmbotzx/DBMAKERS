@@ -72,7 +72,7 @@ async def download_with_aria2c(url, output_dir, filename):
 logger = logging.getLogger(__name__)
 
 async def get_song_download_url_by_spotify_url(spotify_url: str):
-    logger.info(f"url {spotify_url}")
+    logger.info(f"Processing Spotify URL: {spotify_url}")
     api_urls = [
         f"https://tet-kpy4.onrender.com/spotify?url={spotify_url}",
         f"https://tet-kpy4.onrender.com/spotify2?url={spotify_url}"
@@ -80,34 +80,46 @@ async def get_song_download_url_by_spotify_url(spotify_url: str):
 
     random.shuffle(api_urls)
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
         for api in api_urls:
             for attempt in range(3):  # Try 3 times per API
                 try:
-                    async with session.get(api, timeout=10) as resp:
+                    logger.info(f"Attempting API {api} (attempt {attempt+1})")
+                    async with session.get(api) as resp:
                         if resp.status == 200:
-                            data = await resp.json()
-                            if data.get("status") and "data" in data:
-                                song_data = data["data"]
-                                found_title = song_data.get("title")
-                                download_url = song_data.get("download")
+                            try:
+                                data = await resp.json()
+                                if data.get("status") and "data" in data:
+                                    song_data = data["data"]
+                                    found_title = song_data.get("title")
+                                    download_url = song_data.get("download")
 
-                                if download_url:
-                                    return found_title, download_url
+                                    if download_url:
+                                        logger.info(f"Successfully got download URL for: {found_title}")
+                                        return found_title, download_url
+                                    else:
+                                        logger.warning(f"No download URL in response from {api}")
                                 else:
-                                    logger.warning(f"No download URL in response from {api}")
-                            else:
-                                logger.warning(f"Invalid response data from {api}: {data}")
+                                    logger.warning(f"Invalid response data from {api}: {data}")
+                            except (json.JSONDecodeError, KeyError) as e:
+                                logger.error(f"Failed to parse JSON response from {api}: {e}")
                         else:
                             logger.error(f"API request failed with status {resp.status} from {api}")
+                            error_text = await resp.text()
+                            logger.error(f"Error response: {error_text[:200]}...")
+                            
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout while requesting {api} (attempt {attempt+1})")
                 except Exception as e:
                     logger.error(f"Exception while requesting {api} (attempt {attempt+1}): {e}")
 
-                # Optional small delay before retrying
-                await asyncio.sleep(3)
+                # Small delay before retrying
+                if attempt < 2:  # Don't delay after last attempt
+                    await asyncio.sleep(2 + attempt)  # Progressive delay
 
-            logger.warning(f"Failed 3 attempts on {api}, moving to next API")
+            logger.warning(f"Failed all 3 attempts on {api}, moving to next API")
 
+    logger.error(f"All APIs failed for URL: {spotify_url}")
     return None, None
 
 async def download_thumbnail(thumb_url: str, output_path: str) -> bool:

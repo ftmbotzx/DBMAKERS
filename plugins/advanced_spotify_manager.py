@@ -20,9 +20,12 @@ class AdvancedSpotifyManager:
         self.current_client_index = 0
         self.lock = asyncio.Lock()
         self.telegram_client = None
+        self.token_cache_file = "token_cache.json"
 
         # Load clients from JSON
         self._load_clients()
+        # Load cached tokens
+        self._load_token_cache()
 
     def _load_clients(self):
         """Load client credentials from JSON file"""
@@ -47,6 +50,40 @@ class AdvancedSpotifyManager:
         except Exception as e:
             logger.error(f"Failed to load clients from {self.clients_file}: {e}")
             self.clients = []
+
+    def _load_token_cache(self):
+        """Load cached tokens from file"""
+        try:
+            with open(self.token_cache_file, 'r') as f:
+                cache_data = json.load(f)
+                
+            for client_id, cache_info in cache_data.items():
+                if client_id in self.client_stats:
+                    # Only load if not expired
+                    if time.time() < cache_info.get('token_expiry', 0):
+                        self.client_stats[client_id]['token'] = cache_info.get('token')
+                        self.client_stats[client_id]['token_expiry'] = cache_info.get('token_expiry')
+                        logger.info(f"Loaded cached token for client {client_id[:8]}...")
+                        
+        except (FileNotFoundError, json.JSONDecodeError, Exception) as e:
+            logger.info(f"Could not load token cache: {e}")
+
+    def _save_token_cache(self):
+        """Save tokens to cache file"""
+        try:
+            cache_data = {}
+            for client_id, stats in self.client_stats.items():
+                if stats.get('token') and stats.get('token_expiry', 0) > time.time():
+                    cache_data[client_id] = {
+                        'token': stats['token'],
+                        'token_expiry': stats['token_expiry']
+                    }
+            
+            with open(self.token_cache_file, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+                
+        except Exception as e:
+            logger.error(f"Could not save token cache: {e}")
 
     def set_telegram_client(self, telegram_client):
         """Set the Telegram client for logging"""
@@ -125,6 +162,8 @@ class AdvancedSpotifyManager:
                     stats['token_expiry'] = time.time() + 3600  # 1 hour
                     stats['status'] = 'active'
                     stats['last_used'] = datetime.now()
+                    # Save to cache
+                    self._save_token_cache()
                 else:
                     # Try to switch to next client
                     await self._switch_to_next_client()
@@ -136,7 +175,8 @@ class AdvancedSpotifyManager:
         """Switch to the next available client"""
         original_index = self.current_client_index
         attempts = 0
-
+        
+        # First, try to find an immediately available client
         for _ in range(len(self.clients)):
             attempts += 1
             self.current_client_index = (self.current_client_index + 1) % len(self.clients)
@@ -145,7 +185,7 @@ class AdvancedSpotifyManager:
 
             # Check if client is available (not rate limited or invalid)
             stats = self.client_stats[client_id]
-            if stats['status'] not in ['invalid', 'rate_limited']:
+            if stats['status'] == 'active':
                 await self._log_to_telegram(f"🔄 Switched to client `{client_id[:8]}...` (attempt {attempts})")
                 logger.info(f"Switched to client {client_id[:8]}... after {attempts} attempts")
                 return True

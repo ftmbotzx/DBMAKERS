@@ -125,6 +125,43 @@ async def monitor_spotify_clients(client: Client, message: Message):
 
         response_text += f"📈 **Summary:** {active_count} Active | {rate_limited_count} Rate Limited | {invalid_count} Invalid\n\n"
 
+        # Individual client status
+        response_text += "📋 **Individual Status:**\n"
+        for result in test_results:
+            client_id = result['client_id']
+            short_id = client_id[:8]
+            status = result['status']
+            emoji = monitor.status_emojis.get(status, '❓')
+            
+            # Add manager stats if available
+            manager_stat = manager_stats.get(client_id, {})
+            requests_count = manager_stat.get('requests', 0)
+            
+            status_line = f"{emoji} `{short_id}...` - {status}"
+            if requests_count > 0:
+                status_line += f" ({requests_count} reqs)"
+            if client_id == current_client_id:
+                status_line += " ⭐"
+            
+            response_text += f"{status_line}\n"
+
+        # Performance info
+        test_duration = time.time() - start_time
+        response_text += f"\n⏱️ **Test Duration:** {test_duration:.2f}s"
+
+        # Update message
+        if len(response_text) > 4096:
+            response_text = response_text[:4000] + "\n\n⚠️ Output truncated..."
+
+        await status_msg.edit_text(response_text)
+
+        # Break if not auto-refresh
+        if not auto_refresh:
+            break
+
+        # Wait before next update (only if auto-refresh)
+        await asyncio.sleep(30)  # Update every 30 secondsate Limited | {invalid_count} Invalid\n\n"
+
         # Individual client statuses
         response_text += "**Client Details:**\n"
         for result in test_results:
