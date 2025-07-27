@@ -1,11 +1,12 @@
+
 import os
 import time
 import logging
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
+from plugins.advanced_spotify_manager import get_spotify_manager
+import re
 
 # -------- Logger Setup --------
 logging.basicConfig(
@@ -15,17 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# -------- Spotify Credentials --------
-SPOTIFY_CLIENT_ID = "c6e8b0da7751415e848a97f309bc057d"
-SPOTIFY_CLIENT_SECRET = "97d40c2c7b7948589df58d838b8e9e68"
-
-auth_manager = SpotifyClientCredentials(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET)
-sp = spotipy.Spotify(auth_manager=auth_manager)
-
-
-
 def extract_user_id(spotify_url: str) -> str:
-    import re
     match = re.search(r"open\.spotify\.com/user/([a-zA-Z0-9]+)", spotify_url)
     if match:
         return match.group(1)
@@ -50,8 +41,12 @@ async def process_user_file(client: Client, message: Message):
 
     status_msg = await message.reply(f"⏳ Starting to process {total_users} users from the file...")
 
+    # Initialize Spotify manager
+    manager = get_spotify_manager()
+    manager.set_telegram_client(client)
+
     global_total_tracks = 0
-    all_users_track_ids = []  # <-- New list to collect all users' tracks
+    all_users_track_ids = []
 
     for user_index, line in enumerate(lines, start=1):
         if "-" not in line:
@@ -70,15 +65,17 @@ async def process_user_file(client: Client, message: Message):
                 f"🔍 [{user_index}/{total_users}] Fetching playlists for user: **{user_name}** ({user_id})..."
             )
 
-            playlists = sp.user_playlists(user_id)
-            if not playlists['items']:
+            # Get Spotify client
+            spotify_client = await manager.get_spotify_client()
+            playlists = await spotify_client.user_playlists(user_id)
+            
+            if not playlists or not playlists.get('items'):
                 await status_msg.edit(f"⚠️ No public playlists found for user **{user_name}**.")
                 continue
 
             total_playlists = 0
             total_tracks_user = 0
-            total_playlists_count = playlists.get("total") or None
-
+            total_playlists_count = playlists.get("total")
             user_track_ids = []
 
             while playlists:
@@ -86,18 +83,21 @@ async def process_user_file(client: Client, message: Message):
                     total_playlists += 1
                     pid = playlist['id']
                     pname = playlist['name']
-                    tracks = sp.playlist_tracks(pid)
+                    
+                    tracks = await spotify_client.playlist_tracks(pid)
                     playlist_tracks_count = 0
 
                     while tracks:
-                        for item in tracks['items']:
-                            track = item['track']
-                            if track:
-                                user_track_ids.append(track['id'])
-                                total_tracks_user += 1
-                                playlist_tracks_count += 1
-                        if tracks['next']:
-                            tracks = sp.next(tracks)
+                        if 'items' in tracks:
+                            for item in tracks['items']:
+                                track = item.get('track')
+                                if track and track.get('id'):
+                                    user_track_ids.append(track['id'])
+                                    total_tracks_user += 1
+                                    playlist_tracks_count += 1
+
+                        if tracks.get('next'):
+                            tracks = await spotify_client.next(tracks)
                         else:
                             tracks = None
 
@@ -113,13 +113,13 @@ async def process_user_file(client: Client, message: Message):
                     )
                     await asyncio.sleep(1)
 
-                if playlists['next']:
-                    playlists = sp.next(playlists)
+                if playlists.get('next'):
+                    playlists = await spotify_client.next(playlists)
                 else:
                     playlists = None
 
             unique_user_tracks = list(set(user_track_ids))
-            all_users_track_ids.extend(unique_user_tracks)  # add user's unique tracks to global list
+            all_users_track_ids.extend(unique_user_tracks)
 
             await status_msg.edit(
                 f"✅ Completed [{user_index}/{total_users}]: **{user_name}**\n"
