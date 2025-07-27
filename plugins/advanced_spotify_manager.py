@@ -87,11 +87,19 @@ class AdvancedSpotifyManager:
                         self.client_stats[client_id]['status'] = 'rate_limited'
                         await self._log_to_telegram(f"❌ Client `{client_id[:8]}...` rate limited during token fetch")
                         return None
+                    elif response.status in [400, 401]:
+                        # Mark as invalid credentials
+                        self.client_stats[client_id]['status'] = 'invalid'
+                        await self._log_to_telegram(f"❌ Client `{client_id[:8]}...` has invalid credentials")
+                        logger.error(f"Invalid credentials for client {client_id[:8]}...")
+                        return None
                     else:
                         logger.error(f"Token request failed: {response.status}")
+                        error_text = await response.text()
+                        logger.error(f"Response: {error_text}")
                         return None
         except Exception as e:
-            logger.error(f"Error getting token: {e}")
+            logger.error(f"Error getting token for {client_id[:8]}...: {e}")
             return None
 
     async def get_spotify_client(self):
@@ -133,12 +141,20 @@ class AdvancedSpotifyManager:
             client = self.clients[self.current_client_index]
             client_id = client['client_id']
 
+            # Skip invalid clients and only use active ones
             if self.client_stats[client_id]['status'] == 'active':
                 await self._log_to_telegram(f"🔄 Switched to client `{client_id[:8]}...`")
                 return True
 
-        # All clients are rate limited
-        await self._log_to_telegram("❌ All clients are rate-limited. Script stopped.")
+        # Check if we have any valid clients left
+        valid_clients = [cid for cid, stats in self.client_stats.items() 
+                        if stats['status'] not in ['invalid', 'rate_limited']]
+        
+        if not valid_clients:
+            await self._log_to_telegram("❌ All clients are either invalid or rate-limited. Script stopped.")
+        else:
+            await self._log_to_telegram("❌ All valid clients are rate-limited. Script stopped.")
+        
         return False
 
     async def switch_to_client(self, target_client_id: str) -> bool:
@@ -166,6 +182,9 @@ class AdvancedSpotifyManager:
             elif stats['status'] == 'rate_limited':
                 emoji = "🔴"
                 status_text = "rate-limited"
+            elif stats['status'] == 'invalid':
+                emoji = "❌"
+                status_text = "invalid credentials"
             else:
                 emoji = "❓"
                 status_text = f"unknown ({stats['status']})"
