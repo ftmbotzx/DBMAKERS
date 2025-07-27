@@ -97,11 +97,11 @@ class AdvancedSpotifyManager:
             import os
             cache_data = {}
             current_time = time.time()
-            
+
             for client_id, stats in self.client_stats.items():
                 token = stats.get('token')
                 expiry = stats.get('token_expiry', 0)
-                
+
                 # Only save valid, non-expired tokens
                 if token and expiry > current_time:
                     cache_data[client_id] = {
@@ -118,12 +118,12 @@ class AdvancedSpotifyManager:
             temp_file = self.token_cache_file + '.tmp'
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, indent=2, ensure_ascii=False)
-            
+
             # Atomic move
             if os.path.exists(self.token_cache_file):
                 os.remove(self.token_cache_file)
             os.rename(temp_file, self.token_cache_file)
-            
+
             logger.info(f"Saved {len(cache_data)} tokens to cache")
 
         except PermissionError as e:
@@ -320,11 +320,11 @@ class AdvancedSpotifyManager:
                 if (not last_used or 
                     (isinstance(last_used, datetime) and 
                      (datetime.now() - last_used).total_seconds() > 60)):
-                    
+
                     stats['status'] = 'active'
                     stats['token'] = None  # Force token refresh
                     stats['token_expiry'] = 0
-                    
+
                     # Find and switch to this client
                     for i, client in enumerate(self.clients):
                         if client['client_id'] == client_id:
@@ -502,13 +502,13 @@ class SpotifyClientWrapper:
                         # Other errors
                         error_text = await response.text()
                         logger.error(f"API error {response.status}: {error_text[:200]}")
-                        
+
                         # Try switching client for client errors too
                         if retry_count < 3:
                             await self.manager._switch_to_next_client()
                             new_client = await self.manager.get_spotify_client()
                             return await new_client._make_request(url, params, retry_count + 1)
-                        
+
                         return None
 
         except asyncio.TimeoutError:
@@ -622,3 +622,4 @@ async def switch_client(client: Client, message: Message):
                 return
 
     await message.reply(f"❌ Cannot switch to `{target_client_id}` (not found or invalid)")
+```

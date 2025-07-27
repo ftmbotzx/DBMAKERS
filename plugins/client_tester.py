@@ -167,42 +167,52 @@ async def test_spotify_clients(client: Client, message: Message):
     total_valid = 0
     total_invalid = 0
     total_rate_limited = 0
-    
-    for result in results:
-        if result['status'] == 'valid':
-            total_valid += 1
-        elif result['status'] == 'invalid':
-            total_invalid += 1
-        elif result['status'] == 'rate_limited':
-            total_rate_limited += 1
 
     for result in results:
-        client_id = result['client_id'][:8]
-        status = result['status']
-        
-        if status == 'valid':
-            emoji = "✅"
-            detail = f"Avg: {result['avg_response_time']:.2f}s, Success: {result['success_rate']:.1%}"
-        elif status == 'invalid':
+        client_id = result['client_id']
+        short_id = client_id[:8]
+        cred_status = result['credentials_status']
+        successful_reqs = result.get('successful_requests', 0)
+        avg_time = result.get('avg_response_time', 0)
+
+        # Status emoji
+        if cred_status == 'valid':
+            if successful_reqs == num_test_requests:
+                emoji = "🟢"
+                total_valid += 1
+            elif successful_reqs > 0:
+                emoji = "🟡"
+                total_valid += 1
+            else:
+                emoji = "🔴"
+                total_rate_limited += 1
+        elif cred_status == 'rate_limited':
+            emoji = "⚠️"
+            total_rate_limited += 1
+        elif cred_status == 'invalid':
             emoji = "❌"
-            detail = "Invalid credentials"
-        elif status == 'rate_limited':
-            emoji = "🔴"
-            detail = f"Rate limited after {result.get('requests_before_limit', 0)} requests"
+            total_invalid += 1
         else:
             emoji = "❓"
-            detail = result.get('error', 'Unknown error')
 
-        response_text += f"{emoji} `{client_id}...` - {detail}\n"
+        # Get current requests from manager stats
+        current_requests = manager.client_stats.get(client_id, {}).get('requests', 0)
 
-    response_text += f"\n📊 **Summary:**\n"
+        response_text += f"{emoji} `{short_id}` - {cred_status.title()}"
+        if successful_reqs > 0:
+            response_text += f" ({successful_reqs}/{num_test_requests} reqs, {avg_time:.2f}s avg)"
+        response_text += f" [Total: {current_requests}]\n"
+
+    # Summary
+    response_text += f"\n📈 **Summary:**\n"
     response_text += f"✅ Valid: {total_valid}\n"
-    response_text += f"❌ Invalid: {total_invalid}\n" 
-    response_text += f"🔴 Rate Limited: {total_rate_limited}\n"
-    
-    await status_msg.edit_text(response_text)ate_limited = 0
+    response_text += f"⚠️ Rate Limited: {total_rate_limited}\n"
+    response_text += f"❌ Invalid: {total_invalid}\n"
 
-    for result in results:
+    if len(response_text) > 4096:
+        response_text = response_text[:4090] + "\n\n⚠️ Output truncated..."
+
+    await status_msg.edit_text(response_text)
         client_id = result['client_id']
         short_id = client_id[:8]
         cred_status = result['credentials_status']
