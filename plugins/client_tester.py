@@ -1,3 +1,4 @@
+
 import asyncio
 import aiohttp
 import base64
@@ -16,18 +17,19 @@ class SpotifyClientTester:
 
     async def test_client_credentials(self, session, client_id, client_secret):
         """Test a single client's credentials and get token"""
-        auth_string = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-        headers = {
-            'Authorization': f'Basic {auth_string}',
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }
-        data = {'grant_type': 'client_credentials'}
-
         try:
+            auth_string = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+            headers = {
+                'Authorization': f'Basic {auth_string}',
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            data = {'grant_type': 'client_credentials'}
+
             async with session.post(
                 'https://accounts.spotify.com/api/token',
                 headers=headers,
-                data=data
+                data=data,
+                timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
                 if response.status == 200:
                     token_data = await response.json()
@@ -37,87 +39,59 @@ class SpotifyClientTester:
                         'expires_in': token_data.get('expires_in', 3600)
                     }
                 elif response.status == 429:
-                    retry_after = response.headers.get('Retry-After', 'unknown')
-                    return {
-                        'status': 'rate_limited',
-                        'retry_after': retry_after,
-                        'token': None
-                    }
+                    return {'status': 'rate_limited', 'token': None}
                 elif response.status in [400, 401]:
-                    return {
-                        'status': 'invalid',
-                        'token': None
-                    }
+                    return {'status': 'invalid', 'token': None}
                 else:
-                    return {
-                        'status': f'error_{response.status}',
-                        'token': None
-                    }
+                    return {'status': 'error', 'token': None}
         except Exception as e:
-            return {
-                'status': f'error: {str(e)}',
-                'token': None
-            }
+            logger.error(f"Error testing credentials for {client_id[:8]}...: {e}")
+            return {'status': 'error', 'token': None}
 
-    async def test_api_requests(self, session, token, client_id, num_requests=10):
+    async def test_api_requests(self, session, token, client_id, num_requests=5):
         """Test API requests with a valid token"""
-        headers = {'Authorization': f'Bearer {token}'}
-        request_results = []
+        successful_requests = 0
+        total_time = 0
+        errors = []
 
-        # Test endpoint: search for a simple query
-        test_url = 'https://api.spotify.com/v1/search'
-        test_params = {'q': 'test', 'type': 'track', 'limit': 1}
+        headers = {'Authorization': f'Bearer {token}'}
+        
+        # Test endpoints
+        test_urls = [
+            'https://api.spotify.com/v1/browse/featured-playlists?limit=1',
+            'https://api.spotify.com/v1/browse/categories?limit=1',
+            'https://api.spotify.com/v1/browse/new-releases?limit=1'
+        ]
 
         for i in range(num_requests):
+            url = test_urls[i % len(test_urls)]
             try:
                 start_time = time.time()
-                async with session.get(test_url, headers=headers, params=test_params) as response:
-                    end_time = time.time()
-                    response_time = round((end_time - start_time) * 1000, 2)  # ms
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    request_time = time.time() - start_time
+                    total_time += request_time
 
                     if response.status == 200:
-                        request_results.append({
-                            'request': i + 1,
-                            'status': 'success',
-                            'response_time': response_time
-                        })
+                        successful_requests += 1
                     elif response.status == 429:
-                        retry_after = response.headers.get('Retry-After', 'unknown')
-                        request_results.append({
-                            'request': i + 1,
-                            'status': 'rate_limited',
-                            'response_time': response_time,
-                            'retry_after': retry_after
-                        })
-                        break
+                        errors.append(f"Rate limited on request {i+1}")
+                        break  # Stop testing if rate limited
                     else:
-                        request_results.append({
-                            'request': i + 1,
-                            'status': f'error_{response.status}',
-                            'response_time': response_time
-                        })
+                        errors.append(f"Request {i+1}: HTTP {response.status}")
+
+                # Small delay between requests
+                await asyncio.sleep(0.1)
+
             except Exception as e:
-                request_results.append({
-                    'request': i + 1,
-                    'status': f'error: {str(e)}',
-                    'response_time': 0
-                })
+                errors.append(f"Request {i+1}: {str(e)}")
 
-            # Small delay between requests
-            await asyncio.sleep(0.1)
-
-        # Calculate stats
-        successful_requests = len([r for r in request_results if r['status'] == 'success'])
-        avg_response_time = 0
-        if successful_requests > 0:
-            total_time = sum(r['response_time'] for r in request_results if r['status'] == 'success')
-            avg_response_time = round(total_time / successful_requests, 2)
+        avg_response_time = total_time / max(successful_requests, 1)
 
         return {
             'successful_requests': successful_requests,
-            'total_requests': len(request_results),
+            'total_requests': num_requests,
             'avg_response_time': avg_response_time,
-            'request_details': request_results
+            'errors': errors
         }
 
     async def test_all_clients(self, clients, num_requests=10):
@@ -125,17 +99,22 @@ class SpotifyClientTester:
         results = []
 
         async with aiohttp.ClientSession() as session:
-            for client_data in clients:
-                client_id = client_data['client_id']
-                client_secret = client_data['client_secret']
-
-                # Test credentials first
-                cred_result = await self.test_client_credentials(session, client_id, client_secret)
+            for client in clients:
+                client_id = client['client_id']
+                client_secret = client['client_secret']
 
                 result = {
                     'client_id': client_id,
-                    'credentials_status': cred_result['status']
+                    'credentials_status': 'unknown',
+                    'successful_requests': 0,
+                    'total_requests': num_requests,
+                    'avg_response_time': 0,
+                    'errors': []
                 }
+
+                # Test credentials first
+                cred_result = await self.test_client_credentials(session, client_id, client_secret)
+                result['credentials_status'] = cred_result['status']
 
                 # If credentials are valid, test API requests
                 if cred_result['status'] == 'valid' and cred_result['token']:
@@ -220,12 +199,18 @@ async def test_spotify_clients(client: Client, message: Message):
         # Get current requests from manager stats
         current_requests = manager.client_stats.get(client_id, {}).get('requests', 0)
 
-        response_text += f"{emoji} `{short_id}` – {successful_reqs}/{num_test_requests} requests ({avg_time:.2f}s avg) – {current_requests} total\n"
+        response_text += f"{emoji} `{short_id}` - {cred_status.title()}"
+        if successful_reqs > 0:
+            response_text += f" ({successful_reqs}/{num_test_requests} reqs, {avg_time:.2f}s avg)"
+        response_text += f" [Total: {current_requests}]\n"
 
     # Summary
     response_text += f"\n📈 **Summary:**\n"
-    response_text += f"🟢 Valid: {total_valid}\n"
-    response_text += f"🔴 Rate Limited: {total_rate_limited}\n"
+    response_text += f"✅ Valid: {total_valid}\n"
+    response_text += f"⚠️ Rate Limited: {total_rate_limited}\n"
     response_text += f"❌ Invalid: {total_invalid}\n"
+
+    if len(response_text) > 4096:
+        response_text = response_text[:4090] + "\n\n⚠️ Output truncated..."
 
     await status_msg.edit_text(response_text)

@@ -1,4 +1,3 @@
-
 import asyncio
 import aiohttp
 import base64
@@ -23,7 +22,7 @@ class SpotifyMonitor:
             'error': '⚠️',
             'unknown': '❓'
         }
-    
+
     async def quick_test_client(self, session, client_id, client_secret):
         """Quick test to check if client is working"""
         try:
@@ -33,7 +32,7 @@ class SpotifyMonitor:
                 'Content-Type': 'application/x-www-form-urlencoded'
             }
             data = {'grant_type': 'client_credentials'}
-            
+
             async with session.post(
                 'https://accounts.spotify.com/api/token',
                 headers=headers,
@@ -52,173 +51,117 @@ class SpotifyMonitor:
             return 'timeout'
         except Exception:
             return 'error'
-    
+
     async def get_detailed_status(self, clients):
-        """Get detailed status for all clients"""
-        results = {}
-        
+        """Get detailed status of all clients"""
+        results = []
+
         async with aiohttp.ClientSession() as session:
-            # Test all clients concurrently for faster results
             tasks = []
             for client in clients:
-                client_id = client['client_id']
-                client_secret = client['client_secret']
-                task = self.quick_test_client(session, client_id, client_secret)
-                tasks.append((client_id, task))
-            
-            # Wait for all tests to complete
-            for client_id, task in tasks:
-                try:
-                    status = await task
-                    results[client_id] = status
-                except Exception:
-                    results[client_id] = 'error'
-        
+                task = self.quick_test_client(session, client['client_id'], client['client_secret'])
+                tasks.append(task)
+
+            statuses = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for i, client in enumerate(clients):
+                status = statuses[i] if not isinstance(statuses[i], Exception) else 'error'
+                results.append({
+                    'client_id': client['client_id'],
+                    'status': status
+                })
+
         return results
 
 @Client.on_message(filters.command("monitor") & filters.private)
 async def monitor_spotify_clients(client: Client, message: Message):
     """Real-time monitoring of all Spotify clients with comprehensive status"""
-    
+
     # Parse arguments for refresh option
     args = message.command[1:] if len(message.command) > 1 else []
     auto_refresh = False
     if args and args[0].lower() in ['auto', 'refresh', 'live']:
         auto_refresh = True
-    
+
     # Initial status message
     status_msg = await message.reply("🔄 **Monitoring Spotify Clients...**\n⏳ Testing all clients...")
-    
+
     # Get manager and clients
     manager = get_spotify_manager()
     manager.set_telegram_client(client)
-    
+
     if not manager.clients:
         await status_msg.edit_text("❌ No Spotify clients loaded!")
         return
-    
+
     monitor = SpotifyMonitor()
-    
+
     # Monitoring loop (run once or continuously)
     iteration = 0
     while True:
         iteration += 1
         start_time = time.time()
-        
+
         # Get current manager stats
         manager_stats = manager.client_stats
         current_client_id = manager.get_current_client_id()
-        
+
         # Test all clients
         test_results = await monitor.get_detailed_status(manager.clients)
-        
+
         # Build comprehensive status report
         response_text = f"📊 **Spotify Clients Monitor**"
         if auto_refresh:
             response_text += f" (Update #{iteration})"
         response_text += f"\n🕐 **Last Updated:** {datetime.now().strftime('%H:%M:%S')}\n\n"
-        
-        # Summary counters
-        status_counts = {
-            'working': 0,
-            'rate_limited': 0,
-            'invalid': 0,
-            'error': 0
-        }
-        
-        # Client details
-        for i, client_data in enumerate(manager.clients):
-            client_id = client_data['client_id']
+
+        # Current active client info
+        response_text += f"🎯 **Current Active Client:** `{current_client_id[:8] if current_client_id != 'None' else 'None'}...`\n\n"
+
+        # Stats summary
+        active_count = sum(1 for r in test_results if r['status'] == 'working')
+        rate_limited_count = sum(1 for r in test_results if r['status'] == 'rate_limited')
+        invalid_count = sum(1 for r in test_results if r['status'] == 'invalid')
+
+        response_text += f"📈 **Summary:** {active_count} Active | {rate_limited_count} Rate Limited | {invalid_count} Invalid\n\n"
+
+        # Individual client statuses
+        response_text += "**Client Details:**\n"
+        for result in test_results:
+            client_id = result['client_id']
             short_id = client_id[:8]
-            
-            # Get test result
-            test_status = test_results.get(client_id, 'unknown')
-            
-            # Get manager stats
-            stats = manager_stats.get(client_id, {})
-            session_requests = stats.get('requests', 0)
-            manager_status = stats.get('status', 'unknown')
-            
-            # Determine final status and emoji
-            if test_status == 'working':
-                emoji = monitor.status_emojis['working']
-                status_text = "Working"
-                status_counts['working'] += 1
-            elif test_status == 'rate_limited':
-                emoji = monitor.status_emojis['rate_limited']
-                status_text = "Rate Limited"
-                status_counts['rate_limited'] += 1
-            elif test_status == 'invalid':
-                emoji = monitor.status_emojis['invalid']
-                status_text = "Invalid Credentials"
-                status_counts['invalid'] += 1
-            else:
-                emoji = monitor.status_emojis['error']
-                status_text = f"Error ({test_status})"
-                status_counts['error'] += 1
-            
-            # Mark current active client
-            is_current = client_id == current_client_id
-            current_marker = " 🎯" if is_current else ""
-            
-            # Build client line
-            response_text += f"{emoji} `{short_id}` – {status_text}"
-            
-            if session_requests > 0:
-                response_text += f" | {session_requests} reqs"
-            
-            response_text += current_marker
-            response_text += "\n"
-        
-        # Summary statistics
-        total_clients = len(manager.clients)
-        response_text += f"\n📈 **Summary:**\n"
-        response_text += f"🟢 Working: {status_counts['working']}/{total_clients}\n"
-        response_text += f"🔴 Rate Limited: {status_counts['rate_limited']}/{total_clients}\n"
-        response_text += f"❌ Invalid: {status_counts['invalid']}/{total_clients}\n"
-        response_text += f"⚠️ Errors: {status_counts['error']}/{total_clients}\n"
-        
-        # Current active client details
-        if current_client_id:
-            current_stats = manager_stats.get(current_client_id, {})
-            current_requests = current_stats.get('requests', 0)
-            last_used = current_stats.get('last_used')
-            
-            response_text += f"\n🎯 **Active Client:**\n"
-            response_text += f"`{current_client_id[:8]}` | {current_requests} requests"
-            
-            if last_used:
-                response_text += f" | Last: {last_used.strftime('%H:%M:%S')}"
-        
-        # Performance info
-        test_time = round((time.time() - start_time) * 1000, 1)
-        response_text += f"\n\n⚡ Test completed in {test_time}ms"
-        
-        # Auto-refresh info
+            test_status = result['status']
+
+            # Get manager stats for this client
+            manager_stat = manager_stats.get(client_id, {})
+            requests_count = manager_stat.get('requests', 0)
+
+            # Determine emoji and status text
+            emoji = monitor.status_emojis.get(test_status, '❓')
+
+            # Mark current client
+            current_marker = " 👈" if client_id == current_client_id else ""
+
+            response_text += f"{emoji} `{short_id}` - {test_status.replace('_', ' ').title()} ({requests_count} reqs){current_marker}\n"
+
+        # Execution time
+        exec_time = time.time() - start_time
+        response_text += f"\n⚡ **Test completed in {exec_time:.2f}s**"
+
+        # Rotation info
         if auto_refresh:
-            response_text += f"\n🔄 Auto-refreshing every 30s... (Use /monitor to stop)"
-        
+            response_text += f"\n🔄 Auto-refresh enabled (next in 30s)"
+        else:
+            response_text += f"\n💡 Use `/monitor auto` for auto-refresh"
+
         # Update message
-        try:
-            await status_msg.edit_text(response_text)
-        except Exception as e:
-            # If message is too long, create new one
-            if "too long" in str(e).lower():
-                await status_msg.edit_text(response_text[:4000] + "\n\n⚠️ *Output truncated*")
-            else:
-                logger.error(f"Failed to update monitor message: {e}")
-        
-        # Break if not auto-refresh mode
+        await status_msg.edit_text(response_text)
+
+        # Break if not auto-refresh or sleep for next iteration
         if not auto_refresh:
             break
-        
-        # Wait before next refresh
-        await asyncio.sleep(30)
-        
-        # Safety: stop after 20 iterations to prevent spam
-        if iteration >= 20:
-            await status_msg.edit_text(response_text + "\n\n⏹️ *Auto-refresh stopped (limit reached)*")
-            break
+
+        await asyncio.sleep(30)  # Wait 30 seconds before next update
 
 @Client.on_message(filters.command("status") & filters.private)
 async def quick_status(client: Client, message: Message):

@@ -135,27 +135,47 @@ class AdvancedSpotifyManager:
     async def _switch_to_next_client(self):
         """Switch to the next available client"""
         original_index = self.current_client_index
+        attempts = 0
 
         for _ in range(len(self.clients)):
+            attempts += 1
             self.current_client_index = (self.current_client_index + 1) % len(self.clients)
             client = self.clients[self.current_client_index]
             client_id = client['client_id']
 
-            # Skip invalid clients and only use active ones
-            if self.client_stats[client_id]['status'] == 'active':
-                await self._log_to_telegram(f"🔄 Switched to client `{client_id[:8]}...`")
+            # Check if client is available (not rate limited or invalid)
+            stats = self.client_stats[client_id]
+            if stats['status'] not in ['invalid', 'rate_limited']:
+                await self._log_to_telegram(f"🔄 Switched to client `{client_id[:8]}...` (attempt {attempts})")
+                logger.info(f"Switched to client {client_id[:8]}... after {attempts} attempts")
                 return True
+
+        # If no immediately available clients, try to reset rate-limited ones after some time
+        rate_limited_clients = [cid for cid, stats in self.client_stats.items() 
+                               if stats['status'] == 'rate_limited']
+        
+        if rate_limited_clients:
+            # Reset the first rate-limited client to give it another chance
+            first_rate_limited = rate_limited_clients[0]
+            self.client_stats[first_rate_limited]['status'] = 'active'
+            
+            # Find and switch to this client
+            for i, client in enumerate(self.clients):
+                if client['client_id'] == first_rate_limited:
+                    self.current_client_index = i
+                    await self._log_to_telegram(f"🔄 Retrying rate-limited client `{first_rate_limited[:8]}...`")
+                    return True
 
         # Check if we have any valid clients left
         valid_clients = [cid for cid, stats in self.client_stats.items() 
-                        if stats['status'] not in ['invalid', 'rate_limited']]
+                        if stats['status'] not in ['invalid']]
 
         if not valid_clients:
-            await self._log_to_telegram("❌ All clients are either invalid or rate-limited. Script stopped.")
+            await self._log_to_telegram("❌ All clients are invalid. Please check credentials.")
         else:
-            await self._log_to_telegram("❌ All valid clients are rate-limited. Script stopped.")
+            await self._log_to_telegram("⚠️ All clients temporarily rate-limited. Retrying in rotation.")
 
-        return False
+        return len(valid_clients) > 0
 
     async def switch_to_client(self, target_client_id: str) -> bool:
         """Manually switch to a specific client"""
@@ -206,35 +226,74 @@ class SpotifyClientWrapper:
         self.manager = manager
         self.client_id = client_id
 
-    async def _make_request(self, url: str, params: dict = None):
+    async def _make_request(self, url: str, params: dict = None, retry_count: int = 0):
         """Make authenticated request to Spotify API"""
+        if retry_count > 3:  # Maximum 3 retries
+            logger.error(f"Max retries exceeded for URL: {url}")
+            return None
+
         stats = self.manager.client_stats[self.client_id]
         token = stats['token']
 
         headers = {'Authorization': f'Bearer {token}'}
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as response:
-                stats['requests'] += 1
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    stats['requests'] += 1
 
-                if response.status == 429:
-                    # Rate limited - switch client
-                    retry_after = int(response.headers.get('Retry-After', 30))
-                    stats['status'] = 'rate_limited'
-                    await self.manager._log_to_telegram(f"❌ Client `{self.client_id[:8]}...` hit rate limit, waiting {retry_after}s")
+                    if response.status == 429:
+                        # Rate limited - switch client
+                        retry_after = int(response.headers.get('Retry-After', 30))
+                        stats['status'] = 'rate_limited'
+                        await self.manager._log_to_telegram(f"❌ Client `{self.client_id[:8]}...` hit rate limit (retry {retry_count + 1})")
 
-                    # Wait before switching
-                    await asyncio.sleep(min(retry_after, 5))  # Cap wait time
-
-                    await self.manager._switch_to_next_client()
-                    # Get new client and retry
-                    new_client = await self.manager.get_spotify_client()
-                    return await new_client._make_request(url, params)
-                elif response.status == 200:
-                    return await response.json()
-                else:
-                    logger.error(f"Spotify API error {response.status}")
-                    return None
+                        # Immediate client switch without waiting
+                        switch_success = await self.manager._switch_to_next_client()
+                        if switch_success:
+                            # Get new client and retry
+                            new_client = await self.manager.get_spotify_client()
+                            return await new_client._make_request(url, params, retry_count + 1)
+                        else:
+                            # Wait a bit and retry with same client
+                            await asyncio.sleep(min(retry_after, 5))
+                            return await self._make_request(url, params, retry_count + 1)
+                    
+                    elif response.status == 401:
+                        # Token expired, get new token
+                        await self.manager._log_to_telegram(f"🔄 Token expired for `{self.client_id[:8]}...`, refreshing")
+                        stats['token'] = None
+                        stats['token_expiry'] = 0
+                        
+                        # Get fresh client and retry
+                        new_client = await self.manager.get_spotify_client()
+                        return await new_client._make_request(url, params, retry_count + 1)
+                    
+                    elif response.status == 200:
+                        return await response.json()
+                    else:
+                        logger.error(f"Spotify API error {response.status} for client {self.client_id[:8]}...")
+                        error_text = await response.text()
+                        logger.error(f"Response: {error_text}")
+                        
+                        # Try switching client for server errors
+                        if response.status >= 500:
+                            await self.manager._switch_to_next_client()
+                            new_client = await self.manager.get_spotify_client()
+                            return await new_client._make_request(url, params, retry_count + 1)
+                        
+                        return None
+        
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout for client {self.client_id[:8]}...")
+            # Try switching client on timeout
+            await self.manager._switch_to_next_client()
+            new_client = await self.manager.get_spotify_client()
+            return await new_client._make_request(url, params, retry_count + 1)
+        
+        except Exception as e:
+            logger.error(f"Request error for client {self.client_id[:8]}...: {e}")
+            return None
 
     # Spotify API methods
     async def user_playlists(self, user_id: str):
