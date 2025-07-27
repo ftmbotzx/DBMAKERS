@@ -216,4 +216,3 @@ async def download_thumbnail(thumb_url: str, output_path: str) -> bool:
         logging.error(f"Thumbnail download failed: {e}")
 
     return False
-```

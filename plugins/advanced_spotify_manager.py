@@ -21,6 +21,7 @@ class AdvancedSpotifyManager:
         self.lock = asyncio.Lock()
         self.telegram_client = None
         self.token_cache_file = "token_cache.json"
+        self.rate_limit_cooldown = 60  # seconds to wait when all clients are rate limited
 
         # Load clients from JSON
         self._load_clients()
@@ -39,10 +40,12 @@ class AdvancedSpotifyManager:
                 client_id = client['client_id']
                 self.client_stats[client_id] = {
                     'requests': 0,
-                    'status': 'active',  # active, rate_limited
+                    'status': 'active',  # active, rate_limited, invalid
                     'token': None,
                     'token_expiry': 0,
-                    'last_used': None
+                    'last_used': None,
+                    'rate_limit_reset': 0,  # timestamp when rate limit resets
+                    'consecutive_failures': 0
                 }
 
             logger.info(f"Loaded {len(self.clients)} Spotify clients")
@@ -155,7 +158,8 @@ class AdvancedSpotifyManager:
             }
             data = {'grant_type': 'client_credentials'}
 
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     'https://accounts.spotify.com/api/token',
                     headers=headers,
@@ -165,12 +169,12 @@ class AdvancedSpotifyManager:
                         token_data = await response.json()
                         return token_data.get('access_token')
                     elif response.status == 429:
-                        # Mark as rate limited
+                        retry_after = int(response.headers.get('Retry-After', self.rate_limit_cooldown))
                         self.client_stats[client_id]['status'] = 'rate_limited'
-                        await self._log_to_telegram(f"❌ Client `{client_id[:8]}...` rate limited during token fetch")
+                        self.client_stats[client_id]['rate_limit_reset'] = time.time() + retry_after
+                        await self._log_to_telegram(f"❌ Client `{client_id[:8]}...` rate limited for {retry_after}s")
                         return None
                     elif response.status in [400, 401]:
-                        # Mark as invalid credentials
                         self.client_stats[client_id]['status'] = 'invalid'
                         await self._log_to_telegram(f"❌ Client `{client_id[:8]}...` has invalid credentials")
                         logger.error(f"Invalid credentials for client {client_id[:8]}...")
@@ -185,74 +189,101 @@ class AdvancedSpotifyManager:
             return None
 
     async def get_spotify_client(self):
-        """Get current Spotify client with aggressive rotation and error recovery"""
+        """Get current Spotify client with improved rotation"""
         async with self.lock:
             if not self.clients:
                 raise Exception("No Spotify clients available")
 
-            max_attempts = len(self.clients) + 2
-            current_attempt = 0
+            # First, check if any rate-limited clients can be reactivated
+            current_time = time.time()
+            for client_id, stats in self.client_stats.items():
+                if (stats['status'] == 'rate_limited' and 
+                    stats.get('rate_limit_reset', 0) <= current_time):
+                    stats['status'] = 'active'
+                    stats['consecutive_failures'] = 0
+                    logger.info(f"Client {client_id[:8]}... reactivated after rate limit")
 
-            while current_attempt < max_attempts:
-                current_attempt += 1
-                
-                # Get current client
-                if self.current_client_index >= len(self.clients):
-                    self.current_client_index = 0
-                    
-                current_client = self.clients[self.current_client_index]
-                client_id = current_client['client_id']
-                client_secret = current_client['client_secret']
-                stats = self.client_stats[client_id]
+            # Find available clients
+            available_clients = []
+            for i, client in enumerate(self.clients):
+                client_id = client['client_id']
+                if self.client_stats[client_id]['status'] == 'active':
+                    available_clients.append((i, client))
 
-                # Skip invalid clients immediately
-                if stats['status'] == 'invalid':
-                    await self._switch_to_next_client()
-                    continue
+            if not available_clients:
+                # All clients are rate limited or invalid
+                rate_limited_count = sum(1 for stats in self.client_stats.values() 
+                                       if stats['status'] == 'rate_limited')
+                invalid_count = sum(1 for stats in self.client_stats.values() 
+                                  if stats['status'] == 'invalid')
 
-                # Check if we need a new token
-                current_time = time.time()
-                token_buffer = 300  # 5 minute buffer before expiry
-                
-                needs_new_token = (
-                    not stats.get('token') or 
-                    current_time >= (stats.get('token_expiry', 0) - token_buffer) or 
-                    stats['status'] == 'rate_limited'
-                )
+                if rate_limited_count > 0:
+                    # Wait for the earliest rate limit to reset
+                    earliest_reset = min(stats.get('rate_limit_reset', float('inf'))
+                                       for stats in self.client_stats.values()
+                                       if stats['status'] == 'rate_limited')
 
-                if needs_new_token:
-                    logger.info(f"Getting new token for client {client_id[:8]}...")
-                    token = await self._get_access_token(client_id, client_secret)
-                    
-                    if token:
-                        stats['token'] = token
-                        stats['token_expiry'] = current_time + 3600  # 1 hour
-                        stats['status'] = 'active'
-                        stats['last_used'] = datetime.now()
-                        
-                        # Save to cache asynchronously to avoid blocking
-                        try:
-                            self._save_token_cache()
-                        except Exception as e:
-                            logger.warning(f"Failed to save token cache: {e}")
-                        
-                        logger.info(f"Successfully got token for client {client_id[:8]}...")
-                        return SpotifyClientWrapper(self, client_id)
-                    else:
-                        # Token failed, mark client and try next
-                        logger.warning(f"Failed to get token for client {client_id[:8]}...")
-                        if stats['status'] != 'rate_limited':
-                            stats['status'] = 'rate_limited'
-                        
-                        await self._switch_to_next_client()
-                        continue
-                else:
-                    # Token is still valid
+                    if earliest_reset != float('inf'):
+                        wait_time = max(1, int(earliest_reset - current_time))
+                        await self._log_to_telegram(f"⚠️ All clients rate limited. Waiting {wait_time}s...")
+                        logger.info(f"All clients rate limited, waiting {wait_time} seconds...")
+                        await asyncio.sleep(wait_time)
+                        # Recursively try again after waiting
+                        return await self.get_spotify_client()
+
+                raise Exception(f"No available clients (Rate limited: {rate_limited_count}, Invalid: {invalid_count})")
+
+            # Rotate to next available client
+            next_available = None
+            for i, client in available_clients:
+                if i > self.current_client_index:
+                    next_available = (i, client)
+                    break
+
+            if not next_available:
+                # Wrap around to first available client
+                next_available = available_clients[0]
+
+            self.current_client_index, current_client = next_available
+            client_id = current_client['client_id']
+            client_secret = current_client['client_secret']
+            stats = self.client_stats[client_id]
+
+            # Check if we need a new token
+            token_buffer = 300  # 5 minute buffer
+            needs_new_token = (
+                not stats.get('token') or 
+                current_time >= (stats.get('token_expiry', 0) - token_buffer)
+            )
+
+            if needs_new_token:
+                logger.info(f"Getting new token for client {client_id[:8]}...")
+                token = await self._get_access_token(client_id, client_secret)
+
+                if token:
+                    stats['token'] = token
+                    stats['token_expiry'] = current_time + 3600  # 1 hour
+                    stats['status'] = 'active'
                     stats['last_used'] = datetime.now()
-                    return SpotifyClientWrapper(self, client_id)
+                    stats['consecutive_failures'] = 0
 
-            # If we get here, all attempts failed
-            raise Exception(f"Unable to get working Spotify client after {max_attempts} attempts")
+                    self._save_token_cache()
+                    logger.info(f"Successfully got token for client {client_id[:8]}...")
+                    return SpotifyClientWrapper(self, client_id)
+                else:
+                    # Token failed, mark client and try next
+                    stats['consecutive_failures'] += 1
+                    if stats['consecutive_failures'] >= 3:
+                        stats['status'] = 'rate_limited'
+                        stats['rate_limit_reset'] = current_time + self.rate_limit_cooldown
+
+                    # Try next client
+                    self.current_client_index = (self.current_client_index + 1) % len(self.clients)
+                    return await self.get_spotify_client()
+            else:
+                # Token is still valid
+                stats['last_used'] = datetime.now()
+                return SpotifyClientWrapper(self, client_id)
 
     async def _switch_to_next_client(self):
         """Switch to the next available client with improved logic"""
@@ -344,6 +375,8 @@ class AdvancedSpotifyManager:
     def get_client_status(self):
         """Get formatted status of all clients"""
         status_lines = []
+        current_time = time.time()
+
         for client_id, stats in self.client_stats.items():
             short_id = client_id[:8]
 
@@ -352,7 +385,12 @@ class AdvancedSpotifyManager:
                 status_text = f"{stats['requests']} requests"
             elif stats['status'] == 'rate_limited':
                 emoji = "🔴"
-                status_text = "rate-limited"
+                reset_time = stats.get('rate_limit_reset', 0)
+                if reset_time > current_time:
+                    remaining = int(reset_time - current_time)
+                    status_text = f"rate-limited ({remaining}s left)"
+                else:
+                    status_text = "rate-limited (ready)"
             elif stats['status'] == 'invalid':
                 emoji = "❌"
                 status_text = "invalid credentials"
@@ -381,14 +419,14 @@ class SpotifyClientWrapper:
         self.min_request_interval = 0.1  # 100ms between requests
 
     async def _make_request(self, url: str, params: dict = None, retry_count: int = 0):
-        """Make authenticated request to Spotify API with improved error handling"""
+        """Make authenticated request to Spotify API with comprehensive error handling"""
         if retry_count > 5:  # Increased max retries
-            logger.error(f"Max retries ({retry_count}) exceeded for URL: {url}")
+            logger.error(f"Max retries exceeded for URL: {url}")
             return None
 
         stats = self.manager.client_stats[self.client_id]
         token = stats.get('token')
-        
+
         if not token:
             logger.error(f"No token available for client {self.client_id[:8]}...")
             return None
@@ -405,58 +443,65 @@ class SpotifyClientWrapper:
                     stats['requests'] = stats.get('requests', 0) + 1
 
                     if response.status == 429:
-                        # Rate limited - immediate client switch
+                        # Rate limited - switch client immediately
                         retry_after = int(response.headers.get('Retry-After', 60))
                         stats['status'] = 'rate_limited'
-                        
-                        logger.warning(f"Rate limit hit for client {self.client_id[:8]}... (retry {retry_count + 1})")
-                        
-                        # Aggressive client switching
-                        switch_success = await self.manager._switch_to_next_client()
-                        if switch_success:
-                            # Small delay then retry with new client
-                            await asyncio.sleep(0.2)
+                        stats['rate_limit_reset'] = time.time() + retry_after
+
+                        logger.warning(f"Rate limit hit for client {self.client_id[:8]}...")
+                        await self.manager._log_to_telegram(f"🔄 Client `{self.client_id[:8]}...` hit rate limit, switching...")
+
+                        # Try with a different client
+                        try:
                             new_client = await self.manager.get_spotify_client()
-                            return await new_client._make_request(url, params, retry_count + 1)
-                        else:
-                            # All clients rate limited, wait minimal time
-                            wait_time = min(retry_after, 5)
-                            logger.info(f"All clients rate limited, waiting {wait_time}s...")
-                            await asyncio.sleep(wait_time)
-                            return await self._make_request(url, params, retry_count + 1)
+                            if new_client.client_id != self.client_id:
+                                await asyncio.sleep(0.5)  # Brief delay
+                                return await new_client._make_request(url, params, retry_count + 1)
+                        except Exception:
+                            pass
+
+                        # If no other client available, wait and retry
+                        await asyncio.sleep(min(retry_after, 10))
+                        return await self._make_request(url, params, retry_count + 1)
 
                     elif response.status == 401:
                         # Token expired - force refresh
-                        logger.info(f"Token expired for client {self.client_id[:8]}..., refreshing")
+                        logger.info(f"Token expired for client {self.client_id[:8]}...")
                         stats['token'] = None
                         stats['token_expiry'] = 0
-                        
-                        # Get fresh client and retry immediately
+
                         new_client = await self.manager.get_spotify_client()
                         return await new_client._make_request(url, params, retry_count + 1)
 
                     elif response.status == 200:
-                        # Success - update stats
+                        # Success
                         stats['last_used'] = datetime.now()
+                        stats['consecutive_failures'] = 0
                         return await response.json()
-                        
+
                     elif response.status == 404:
                         # Not found - don't retry
                         logger.warning(f"Resource not found: {url}")
                         return None
-                        
+
                     elif response.status >= 500:
                         # Server error - try different client
-                        logger.warning(f"Server error {response.status} for client {self.client_id[:8]}...")
-                        await self.manager._switch_to_next_client()
-                        new_client = await self.manager.get_spotify_client()
-                        await asyncio.sleep(0.5)  # Brief delay for server errors
-                        return await new_client._make_request(url, params, retry_count + 1)
-                        
+                        logger.warning(f"Server error {response.status}")
+                        try:
+                            new_client = await self.manager.get_spotify_client()
+                            if new_client.client_id != self.client_id:
+                                await asyncio.sleep(1)
+                                return await new_client._make_request(url, params, retry_count + 1)
+                        except Exception:
+                            pass
+
+                        await asyncio.sleep(2)
+                        return await self._make_request(url, params, retry_count + 1)
+
                     else:
                         # Other errors
                         error_text = await response.text()
-                        logger.error(f"API error {response.status} for client {self.client_id[:8]}...: {error_text}")
+                        logger.error(f"API error {response.status}: {error_text[:200]}")
                         
                         # Try switching client for client errors too
                         if retry_count < 3:
@@ -467,11 +512,11 @@ class SpotifyClientWrapper:
                         return None
 
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout for client {self.client_id[:8]}... (retry {retry_count + 1})")
-            # Try different client on timeout
-            await self.manager._switch_to_next_client()
-            new_client = await self.manager.get_spotify_client()
-            return await new_client._make_request(url, params, retry_count + 1)
+            logger.warning(f"Timeout for client {self.client_id[:8]}...")
+            if retry_count < 2:
+                await asyncio.sleep(1)
+                return await self._make_request(url, params, retry_count + 1)
+            return None
 
         except aiohttp.ClientError as e:
             logger.error(f"Client error for {self.client_id[:8]}...: {e}")
@@ -484,26 +529,23 @@ class SpotifyClientWrapper:
             return None
 
         except Exception as e:
-            logger.error(f"Unexpected error for client {self.client_id[:8]}...: {e}")
+            logger.error(f"Request error for {self.client_id[:8]}...: {e}")
+            if retry_count < 2:
+                await asyncio.sleep(1)
+                return await self._make_request(url, params, retry_count + 1)
             return None
 
     async def _rate_limit_delay(self):
-        """Smart delay between requests to avoid rate limits"""
+        """Smart delay between requests"""
         current_time = time.time()
         time_since_last = current_time - self.last_request_time
-        
+
         if time_since_last < self.min_request_interval:
             delay = self.min_request_interval - time_since_last
             await asyncio.sleep(delay)
-        
+
         self.last_request_time = time.time()
         self.request_count += 1
-        
-        # Progressive delays for high request counts
-        if self.request_count > 50:
-            await asyncio.sleep(0.2)
-        elif self.request_count > 100:
-            await asyncio.sleep(0.5)
 
     # Spotify API methods with rate limiting
     async def user_playlists(self, user_id: str, limit: int = 50):
@@ -571,9 +613,12 @@ async def switch_client(client: Client, message: Message):
     manager = get_spotify_manager()
     manager.set_telegram_client(client)
 
-    success = await manager.switch_to_client(target_client_id)
+    # Find and switch to the client
+    for i, client_data in enumerate(manager.clients):
+        if client_data['client_id'].startswith(target_client_id):
+            if manager.client_stats[client_data['client_id']]['status'] in ['active', 'rate_limited']:
+                manager.current_client_index = i
+                await message.reply(f"✅ Switched to client: `{client_data['client_id'][:8]}...`")
+                return
 
-    if success:
-        await message.reply(f"✅ Switched to client: `{target_client_id}`")
-    else:
-        await message.reply(f"❌ Cannot switch to `{target_client_id}` (not found or rate-limited)")
+    await message.reply(f"❌ Cannot switch to `{target_client_id}` (not found or invalid)")

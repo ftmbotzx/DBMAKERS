@@ -167,6 +167,40 @@ async def test_spotify_clients(client: Client, message: Message):
     total_valid = 0
     total_invalid = 0
     total_rate_limited = 0
+    
+    for result in results:
+        if result['status'] == 'valid':
+            total_valid += 1
+        elif result['status'] == 'invalid':
+            total_invalid += 1
+        elif result['status'] == 'rate_limited':
+            total_rate_limited += 1
+
+    for result in results:
+        client_id = result['client_id'][:8]
+        status = result['status']
+        
+        if status == 'valid':
+            emoji = "✅"
+            detail = f"Avg: {result['avg_response_time']:.2f}s, Success: {result['success_rate']:.1%}"
+        elif status == 'invalid':
+            emoji = "❌"
+            detail = "Invalid credentials"
+        elif status == 'rate_limited':
+            emoji = "🔴"
+            detail = f"Rate limited after {result.get('requests_before_limit', 0)} requests"
+        else:
+            emoji = "❓"
+            detail = result.get('error', 'Unknown error')
+
+        response_text += f"{emoji} `{client_id}...` - {detail}\n"
+
+    response_text += f"\n📊 **Summary:**\n"
+    response_text += f"✅ Valid: {total_valid}\n"
+    response_text += f"❌ Invalid: {total_invalid}\n" 
+    response_text += f"🔴 Rate Limited: {total_rate_limited}\n"
+    
+    await status_msg.edit_text(response_text)ate_limited = 0
 
     for result in results:
         client_id = result['client_id']
