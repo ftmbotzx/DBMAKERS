@@ -1,5 +1,6 @@
 # utils.py
 
+# Improved file operations and error handling
 import aiohttp
 import asyncio
 import logging
@@ -8,8 +9,85 @@ import re
 import urllib.parse
 
 import random
+import json
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
+
+def ensure_file_exists(file_path: str, default_content: Any = None):
+    """Ensure a file exists, create it with default content if not"""
+    try:
+        if not os.path.exists(file_path):
+            # Create directory if needed
+            directory = os.path.dirname(file_path)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+
+            # Create file with default content
+            if default_content is not None:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    if isinstance(default_content, (dict, list)):
+                        json.dump(default_content, f, indent=2)
+                    else:
+                        f.write(str(default_content))
+            else:
+                # Create empty file
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    pass
+
+            logger.info(f"Created file: {file_path}")
+            return True
+    except Exception as e:
+        logger.error(f"Failed to create file {file_path}: {e}")
+        return False
+
+    return True
+
+def safe_read_json(file_path: str, default: Any = None) -> Any:
+    """Safely read JSON file with fallback"""
+    try:
+        if not os.path.exists(file_path):
+            return default
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError) as e:
+        logger.warning(f"Could not read JSON from {file_path}: {e}")
+        return default
+    except Exception as e:
+        logger.error(f"Unexpected error reading {file_path}: {e}")
+        return default
+
+def safe_write_json(file_path: str, data: Any) -> bool:
+    """Safely write JSON file with atomic operation"""
+    try:
+        # Ensure directory exists
+        directory = os.path.dirname(file_path)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory, exist_ok=True)
+
+        # Write to temporary file first
+        temp_file = file_path + '.tmp'
+        with open(temp_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        # Atomic move
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        os.rename(temp_file, file_path)
+
+        return True
+    except Exception as e:
+        logger.error(f"Failed to write JSON to {file_path}: {e}")
+        # Clean up temp file
+        temp_file = file_path + '.tmp'
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+        return False
+
 
 class temp(object):
     BANNED_USERS = []
@@ -23,7 +101,7 @@ class temp(object):
     SETTINGS = {}
     VERIFY = {}
     MOVIES = {}
-    
+
 
 def safe_filename(name: str) -> str:
     """Remove unsafe filesystem characters from a filename."""
@@ -51,7 +129,7 @@ async def download_with_aria2c(url, output_dir, filename):
             "-o", filename,
             url
         ]
-       
+
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -59,9 +137,9 @@ async def download_with_aria2c(url, output_dir, filename):
         )
         stdout, stderr = await process.communicate()
 
-   
+
         if process.returncode == 0:
-         
+
             return True
         else:
             logger.error(f"aria2c failed with exit code {process.returncode}")
@@ -107,7 +185,7 @@ async def get_song_download_url_by_spotify_url(spotify_url: str):
                             logger.error(f"API request failed with status {resp.status} from {api}")
                             error_text = await resp.text()
                             logger.error(f"Error response: {error_text[:200]}...")
-                            
+
                 except asyncio.TimeoutError:
                     logger.error(f"Timeout while requesting {api} (attempt {attempt+1})")
                 except Exception as e:
@@ -138,3 +216,4 @@ async def download_thumbnail(thumb_url: str, output_path: str) -> bool:
         logging.error(f"Thumbnail download failed: {e}")
 
     return False
+```
