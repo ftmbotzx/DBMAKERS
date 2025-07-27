@@ -1,4 +1,3 @@
-
 import asyncio
 import aiohttp
 import base64
@@ -39,77 +38,6 @@ class SpotifyClientTester:
                         'expires_in': token_data.get('expires_in', 3600)
                     }
                 elif response.status == 429:
-                    return {'status': 'rate_limited'}
-                elif response.status in [400, 401]:
-                    return {'status': 'invalid'}
-                else:
-                    return {'status': 'error'}
-        except Exception as e:
-            logger.error(f"Error testing client {client_id[:8]}...: {e}")
-            return {'status': 'error'}
-
-    async def test_all_clients(self, clients, num_requests=10):
-        """Test all clients comprehensively"""
-        results = []
-        
-        async with aiohttp.ClientSession() as session:
-            for client in clients:
-                client_id = client['client_id']
-                client_secret = client['client_secret']
-                
-                # Test credentials
-                cred_result = await self.test_client_credentials(session, client_id, client_secret)
-                
-                result = {
-                    'client_id': client_id,
-                    'credentials': cred_result['status'],
-                    'requests_successful': 0,
-                    'requests_failed': 0,
-                    'rate_limited': False
-                }
-                
-                # If credentials are valid, test API requests
-                if cred_result['status'] == 'valid':
-                    token = cred_result['token']
-                    headers = {'Authorization': f'Bearer {token}'}
-                    
-                    for i in range(num_requests):
-                        try:
-                            async with session.get(
-                                'https://api.spotify.com/v1/search',
-                                headers=headers,
-                                params={'q': 'test', 'type': 'track', 'limit': 1},
-                                timeout=aiohttp.ClientTimeout(total=5)
-                            ) as response:
-                                if response.status == 200:
-                                    result['requests_successful'] += 1
-                                elif response.status == 429:
-                                    result['rate_limited'] = True
-                                    result['requests_failed'] += 1
-                                else:
-                                    result['requests_failed'] += 1
-                        except Exception:
-                            result['requests_failed'] += 1
-                        
-                        # Small delay between requests
-                        await asyncio.sleep(0.1)
-                
-                results.append(result)
-
-            async with session.post(
-                'https://accounts.spotify.com/api/token',
-                headers=headers,
-                data=data,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                if response.status == 200:
-                    token_data = await response.json()
-                    return {
-                        'status': 'valid',
-                        'token': token_data.get('access_token'),
-                        'expires_in': token_data.get('expires_in', 3600)
-                    }
-                elif response.status == 429:
                     return {'status': 'rate_limited', 'token': None}
                 elif response.status in [400, 401]:
                     return {'status': 'invalid', 'token': None}
@@ -126,7 +54,7 @@ class SpotifyClientTester:
         errors = []
 
         headers = {'Authorization': f'Bearer {token}'}
-        
+
         # Test endpoints
         test_urls = [
             'https://api.spotify.com/v1/browse/featured-playlists?limit=1',
@@ -239,39 +167,6 @@ async def test_spotify_clients(client: Client, message: Message):
     total_valid = 0
     total_invalid = 0
     total_rate_limited = 0
-
-    for result in results:
-        client_id = result['client_id']
-        short_id = client_id[:8]
-        
-        if result['credentials'] == 'valid':
-            total_valid += 1
-            emoji = "🟢"
-            status = f"Valid - {result['requests_successful']}/{num_test_requests} requests successful"
-            if result['rate_limited']:
-                emoji = "🟡"
-                status += " (rate limited)"
-                total_rate_limited += 1
-        elif result['credentials'] == 'invalid':
-            total_invalid += 1
-            emoji = "❌"
-            status = "Invalid credentials"
-        elif result['credentials'] == 'rate_limited':
-            total_rate_limited += 1
-            emoji = "🔴"
-            status = "Rate limited during token fetch"
-        else:
-            emoji = "⚠️"
-            status = "Error during testing"
-
-        response_text += f"{emoji} `{short_id}...` - {status}\n"
-
-    response_text += f"\n📈 **Summary:** {total_valid} Valid | {total_invalid} Invalid | {total_rate_limited} Rate Limited"
-
-    if len(response_text) > 4096:
-        response_text = response_text[:4000] + "\n\n⚠️ Output truncated..."
-
-    await status_msg.edit_text(response_text)ate_limited = 0
 
     for result in results:
         client_id = result['client_id']

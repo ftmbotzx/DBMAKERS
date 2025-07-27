@@ -13,18 +13,14 @@ logger = logging.getLogger(__name__)
 class SpotifyMonitor:
     def __init__(self):
         self.status_emojis = {
-            'active': '🟢',
-            'working': '🟢', 
             'valid': '🟢',
-            'rate_limited': '🔴',
             'invalid': '❌',
-            'testing': '🔄',
-            'error': '⚠️',
-            'unknown': '❓'
+            'rate_limited': '🔴',
+            'error': '⚠️'
         }
 
     async def quick_test_client(self, session, client_id, client_secret):
-        """Quick test to check if client is working"""
+        """Quick test of a single client"""
         try:
             auth_string = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
             headers = {
@@ -40,16 +36,15 @@ class SpotifyMonitor:
                 timeout=aiohttp.ClientTimeout(total=5)
             ) as response:
                 if response.status == 200:
-                    return 'working'
+                    return 'valid'
                 elif response.status == 429:
                     return 'rate_limited'
                 elif response.status in [400, 401]:
                     return 'invalid'
                 else:
                     return 'error'
-        except asyncio.TimeoutError:
-            return 'timeout'
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error testing client {client_id[:8]}...: {e}")
             return 'error'
 
     async def get_detailed_status(self, clients):
@@ -96,34 +91,33 @@ async def monitor_spotify_clients(client: Client, message: Message):
 
     monitor = SpotifyMonitor()
 
-    # Monitoring loop (run once or continuously)
-    iteration = 0
     while True:
-        iteration += 1
         start_time = time.time()
 
-        # Get current manager stats
-        manager_stats = manager.client_stats
+        # Get current client info
         current_client_id = manager.get_current_client_id()
+        manager_stats = manager.client_stats
 
         # Test all clients
         test_results = await monitor.get_detailed_status(manager.clients)
 
-        # Build comprehensive status report
-        response_text = f"📊 **Spotify Clients Monitor**"
-        if auto_refresh:
-            response_text += f" (Update #{iteration})"
-        response_text += f"\n🕐 **Last Updated:** {datetime.now().strftime('%H:%M:%S')}\n\n"
-
-        # Current active client info
-        response_text += f"🎯 **Current Active Client:** `{current_client_id[:8] if current_client_id != 'None' else 'None'}...`\n\n"
-
-        # Stats summary
-        active_count = sum(1 for r in test_results if r['status'] == 'working')
-        rate_limited_count = sum(1 for r in test_results if r['status'] == 'rate_limited')
+        # Count statuses
+        valid_count = sum(1 for r in test_results if r['status'] == 'valid')
         invalid_count = sum(1 for r in test_results if r['status'] == 'invalid')
+        rate_limited_count = sum(1 for r in test_results if r['status'] == 'rate_limited')
+        active_count = valid_count
 
-        response_text += f"📈 **Summary:** {active_count} Active | {rate_limited_count} Rate Limited | {invalid_count} Invalid\n\n"
+        # Build response
+        response_text = f"📊 **Spotify Clients Monitor**\n"
+        response_text += f"🕐 **Last Update:** {datetime.now().strftime('%H:%M:%S')}\n\n"
+
+        # Current client info
+        if current_client_id:
+            current_short = current_client_id[:8]
+            response_text += f"⭐ **Current Client:** `{current_short}...`\n\n"
+
+        # Summary
+        response_text += f"📈 **Summary:** {valid_count} Valid | {rate_limited_count} Rate Limited | {invalid_count} Invalid\n\n"
 
         # Individual client status
         response_text += "📋 **Individual Status:**\n"
@@ -132,17 +126,17 @@ async def monitor_spotify_clients(client: Client, message: Message):
             short_id = client_id[:8]
             status = result['status']
             emoji = monitor.status_emojis.get(status, '❓')
-            
+
             # Add manager stats if available
             manager_stat = manager_stats.get(client_id, {})
             requests_count = manager_stat.get('requests', 0)
-            
+
             status_line = f"{emoji} `{short_id}...` - {status}"
             if requests_count > 0:
                 status_line += f" ({requests_count} reqs)"
             if client_id == current_client_id:
                 status_line += " ⭐"
-            
+
             response_text += f"{status_line}\n"
 
         # Performance info
@@ -160,93 +154,54 @@ async def monitor_spotify_clients(client: Client, message: Message):
             break
 
         # Wait before next update (only if auto-refresh)
-        await asyncio.sleep(30)  # Update every 30 secondsate Limited | {invalid_count} Invalid\n\n"
-
-        # Individual client statuses
-        response_text += "**Client Details:**\n"
-        for result in test_results:
-            client_id = result['client_id']
-            short_id = client_id[:8]
-            test_status = result['status']
-
-            # Get manager stats for this client
-            manager_stat = manager_stats.get(client_id, {})
-            requests_count = manager_stat.get('requests', 0)
-
-            # Determine emoji and status text
-            emoji = monitor.status_emojis.get(test_status, '❓')
-
-            # Mark current client
-            current_marker = " 👈" if client_id == current_client_id else ""
-
-            response_text += f"{emoji} `{short_id}` - {test_status.replace('_', ' ').title()} ({requests_count} reqs){current_marker}\n"
-
-        # Execution time
-        exec_time = time.time() - start_time
-        response_text += f"\n⚡ **Test completed in {exec_time:.2f}s**"
-
-        # Rotation info
-        if auto_refresh:
-            response_text += f"\n🔄 Auto-refresh enabled (next in 30s)"
-        else:
-            response_text += f"\n💡 Use `/monitor auto` for auto-refresh"
-
-        # Update message
-        await status_msg.edit_text(response_text)
-
-        # Break if not auto-refresh or sleep for next iteration
-        if not auto_refresh:
-            break
-
-        await asyncio.sleep(30)  # Wait 30 seconds before next update
+        await asyncio.sleep(30)  # Update every 30 seconds
 
 @Client.on_message(filters.command("status") & filters.private)
-async def quick_status(client: Client, message: Message):
-    """Quick status overview without detailed testing"""
-    
+async def quick_status_check(client: Client, message: Message):
+    """Quick status check of all clients"""
+
+    status_msg = await message.reply("🔍 **Quick Status Check...**")
+
+    # Get manager
     manager = get_spotify_manager()
     manager.set_telegram_client(client)
-    
+
     if not manager.clients:
-        await message.reply("❌ No Spotify clients loaded!")
+        await status_msg.edit_text("❌ No Spotify clients loaded!")
         return
-    
-    monitor = SpotifyMonitor()
-    
-    # Get manager stats without testing
-    response_text = f"⚡ **Quick Status Overview**\n🕐 {datetime.now().strftime('%H:%M:%S')}\n\n"
-    
+
+    # Quick count from manager stats
+    manager_stats = manager.client_stats
     current_client_id = manager.get_current_client_id()
-    
-    # Summary from manager stats only
+
     active_count = 0
     rate_limited_count = 0
-    
+
+    response_text = f"⚡ **Quick Status Check**\n\n"
+
     for client_data in manager.clients:
         client_id = client_data['client_id']
         short_id = client_id[:8]
-        stats = manager.client_stats.get(client_id, {})
-        
-        status = stats.get('status', 'unknown')
+
+        stats = manager_stats.get(client_id, {})
         requests = stats.get('requests', 0)
-        
+        status = stats.get('status', 'unknown')
+
         if status == 'active':
-            emoji = monitor.status_emojis['active']
             active_count += 1
+            emoji = "🟢"
         elif status == 'rate_limited':
-            emoji = monitor.status_emojis['rate_limited']
             rate_limited_count += 1
+            emoji = "🔴"
         else:
-            emoji = monitor.status_emojis['unknown']
-        
-        is_current = client_id == current_client_id
-        current_marker = " 🎯" if is_current else ""
-        
+            emoji = "❓"
+
+        current_marker = " ⭐" if client_id == current_client_id else ""
         response_text += f"{emoji} `{short_id}` – {requests} reqs{current_marker}\n"
-    
+
     # Summary
     total = len(manager.clients)
     response_text += f"\n📊 Active: {active_count} | Rate Limited: {rate_limited_count} | Total: {total}"
-    response_text += f"\n\n💡 Use `/monitor` for detailed testing"
-    
-    await message.reply(response_text)
+    response_text += f"\n⭐ Current: `{current_client_id[:8] if current_client_id else 'None'}...`"
+
+    await status_msg.edit_text(response_text)
