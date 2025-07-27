@@ -622,4 +622,3 @@ async def switch_client(client: Client, message: Message):
                 return
 
     await message.reply(f"❌ Cannot switch to `{target_client_id}` (not found or invalid)")
-```
