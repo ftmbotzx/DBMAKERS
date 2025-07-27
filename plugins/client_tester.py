@@ -220,44 +220,12 @@ async def test_spotify_clients(client: Client, message: Message):
         # Get current requests from manager stats
         current_requests = manager.client_stats.get(client_id, {}).get('requests', 0)
 
-        response_text += f"{emoji} `{short_id}` – "
-
-        if cred_status == 'valid':
-            response_text += f"{successful_reqs}/{num_test_requests} reqs"
-            if avg_time > 0:
-                response_text += f" ({avg_time}ms avg)"
-            if current_requests > 0:
-                response_text += f" | Session: {current_requests}"
-        elif cred_status == 'rate_limited':
-            response_text += "Rate Limited"
-        elif cred_status == 'invalid':
-            response_text += "Invalid Credentials"
-        else:
-            response_text += f"Error: {cred_status}"
-
-        response_text += "\n"
+        response_text += f"{emoji} `{short_id}` – {successful_reqs}/{num_test_requests} requests ({avg_time:.2f}s avg) – {current_requests} total\n"
 
     # Summary
     response_text += f"\n📈 **Summary:**\n"
-    response_text += f"🟢 Valid & Working: {total_valid}\n"
+    response_text += f"🟢 Valid: {total_valid}\n"
     response_text += f"🔴 Rate Limited: {total_rate_limited}\n"
     response_text += f"❌ Invalid: {total_invalid}\n"
 
-    # Current active client
-    current_client_id = manager.get_current_client_id()
-    if current_client_id and current_client_id != "None":
-        response_text += f"\n🎯 **Current Active:** `{current_client_id[:8]}`"
-
-    response_text += f"\n\n💡 Use `/monitor` for real-time monitoring"
-
-    # Split message if too long
-    if len(response_text) > 4096:
-        # Send first part
-        await status_msg.edit_text(response_text[:4000] + "\n\n⚠️ *Output truncated - too long*")
-
-        # Send remaining as new message
-        remaining = response_text[4000:]
-        if remaining:
-            await message.reply(remaining[:4096])
-    else:
-        await status_msg.edit_text(response_text)
+    await status_msg.edit_text(response_text)

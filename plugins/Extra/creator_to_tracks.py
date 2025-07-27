@@ -5,6 +5,7 @@ import logging
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.errors import MessageNotModified
 from plugins.advanced_spotify_manager import get_spotify_manager
 import re
 

@@ -66,10 +66,13 @@ async def get_creators_from_playlists(client: Client, message: Message):
             except Exception as e:
                 logger.warning(f"Error fetching playlist {pid}: {e}")
 
-            if idx % 10 == 0 or idx == total:
-                await status_msg.edit(f"🔍 Extracted creators from {idx}/{total} playlists...")
+            if idx % 20 == 0 or idx == total:  # Reduced frequency of status updates
+                try:
+                    await status_msg.edit(f"🔍 Extracted creators from {idx}/{total} playlists...")
+                except Exception as e:
+                    logger.error(f"Failed to update status: {e}")
 
-            await asyncio.sleep(0.5)  # To avoid rate limits
+            await asyncio.sleep(0.3)  # Optimized sleep time
 
         if not creators_dict:
             return await message.reply("❌ No creators found.")

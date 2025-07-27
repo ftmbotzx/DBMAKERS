@@ -20,29 +20,33 @@ logger = logging.getLogger(__name__)
 SPOTIFY_PLAYLIST_REGEX = r"https://open\.spotify\.com/playlist/([a-zA-Z0-9]+)"
 
 # -------- Extract tracks from one playlist --------
-async def extract_tracks_from_playlist(playlist_id):
-    try:
-        manager = get_spotify_manager()
-        spotify_client = await manager.get_spotify_client()
+async def extract_tracks_from_playlist(playlist_id, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            manager = get_spotify_manager()
+            spotify_client = await manager.get_spotify_client()
 
-        results = await spotify_client.playlist_tracks(playlist_id)
-        tracks = []
+            results = await spotify_client.playlist_tracks(playlist_id)
+            tracks = []
 
-        while results:
-            if 'items' in results:
-                for item in results['items']:
-                    if item and item.get('track') and item['track'].get('id'):
-                        tracks.append(item['track']['id'])
+            while results:
+                if 'items' in results:
+                    for item in results['items']:
+                        if item and item.get('track') and item['track'].get('id'):
+                            tracks.append(item['track']['id'])
 
-            if results.get('next'):
-                results = await spotify_client.next(results)
+                if results.get('next'):
+                    results = await spotify_client.next(results)
+                else:
+                    break
+
+            return tracks
+        except Exception as e:
+            logger.error(f"Error extracting tracks from playlist {playlist_id} (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff
             else:
-                break
-
-        return tracks
-    except Exception as e:
-        logger.error(f"Error extracting tracks from playlist {playlist_id}: {e}")
-        return []
+                return []
 
 # -------- Command Handler --------
 @Client.on_message(filters.command("extracttracks") & filters.reply)
@@ -107,14 +111,17 @@ async def extract_from_txt(client: Client, message: Message):
                 batch_start = batch_end + 1
                 batch_tracks.clear()
 
-            # Edit progress message every 5 playlists
-            if (idx + 1) % 5 == 0 or (idx + 1) == total:
+            # Edit progress message every 10 playlists (reduce telegram API calls)
+            if (idx + 1) % 10 == 0 or (idx + 1) == total:
                 try:
                     await status.edit(f"🔍 Extracted {idx + 1}/{total} playlists.")
                 except MessageNotModified:
                     pass
+                except Exception as e:
+                    logger.error(f"Failed to update status: {e}")
 
-            await asyncio.sleep(0.5)
+            # Reduced sleep time for better performance
+            await asyncio.sleep(0.2)
 
         await status.edit(f"✅ Extraction complete! Total playlists processed: {total - start_index}. Total unique tracks: {len(set(final_track_ids))}")
 

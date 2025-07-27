@@ -1,131 +1,142 @@
-import os
-import time
-import json
-import re
-import asyncio
-from datetime import datetime
 import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.errors import MessageNotModified
+import re
+import os
+import asyncio
+import time
+import json
+from datetime import datetime
 from plugins.advanced_spotify_manager import get_spotify_manager
 from database.db import db
-from pyrogram.errors import FloodWait
 
+# -------- Logger Setup --------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S"
 )
 logger = logging.getLogger(__name__)
 
-# Extract Spotify ID from URL
+PROGRESS_FILE = "artist_progress.json"
+
 def extract_spotify_id(url):
-    """Extract Spotify ID from various URL formats"""
-    patterns = [
-        r'spotify:playlist:([a-zA-Z0-9]+)',
-        r'open\.spotify\.com/playlist/([a-zA-Z0-9]+)',
-        r'spotify\.com/playlist/([a-zA-Z0-9]+)'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
+    """Extract Spotify ID from URL"""
+    match = re.search(r"spotify\.com/playlist/([a-zA-Z0-9]+)", url)
+    if match:
+        return match.group(1)
     return None
 
-# Extract tracks from playlist using advanced manager
-async def extract_playlist_tracks(spotify_client, playlist_id):
-    """Extract all tracks from a playlist using the advanced manager"""
-    try:
-        tracks = []
-        result = await spotify_client.playlist_tracks(playlist_id)
-        
-        while result:
-            if 'items' in result:
-                for item in result['items']:
-                    if item and item.get('track') and item['track'].get('id'):
-                        tracks.append(item['track']['id'])
-            
-            # Get next page if available
-            if result.get('next'):
-                result = await spotify_client.next(result)
+def extract_user_id(url):
+    match = re.search(r"spotify\.com/user/([a-zA-Z0-9]+)", url)
+    if match:
+        return match.group(1)
+    return None
+
+async def extract_playlist_tracks(spotify_client, playlist_id, max_retries=3):
+    """Extract tracks from a playlist with retry logic"""
+    for attempt in range(max_retries):
+        try:
+            results = await spotify_client.playlist_tracks(playlist_id)
+            tracks = []
+
+            while results:
+                if 'items' in results:
+                    for item in results['items']:
+                        if item and item.get('track') and item['track'].get('id'):
+                            tracks.append(item['track']['id'])
+
+                if results.get('next'):
+                    results = await spotify_client.next(results)
+                else:
+                    break
+
+            return tracks
+        except Exception as e:
+            logger.error(f"Error extracting tracks from playlist {playlist_id} (attempt {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
             else:
-                break
-                
-        return tracks
-        
-    except Exception as e:
-        logger.error(f"Error extracting tracks from playlist {playlist_id}: {e}")
-        return []
+                return []
 
 @Client.on_message(filters.command("extract") & filters.private)
 async def extract_tracks_command(client: Client, message: Message):
     """Extract tracks from Spotify playlists"""
-    
+
     # Set up manager
     manager = get_spotify_manager()
     manager.set_telegram_client(client)
-    
+
     try:
         # Get Spotify client
         spotify_client = await manager.get_spotify_client()
-        
+
         status_msg = await message.reply("🎵 **Starting Track Extraction**\n⏳ Loading playlists...")
-        
+
         # Load playlist URLs from database or file
-        playlist_collection = db.playlists
-        playlists_cursor = playlist_collection.find({})
-        playlists = await playlists_cursor.to_list(length=None)
-        
+        try:
+            playlist_collection = db.playlists
+            playlists_cursor = playlist_collection.find({})
+            playlists = await playlists_cursor.to_list(length=None)
+        except Exception as e:
+            logger.error(f"Database error: {e}")
+            await status_msg.edit_text("❌ Database connection failed!")
+            return
+
         if not playlists:
             await status_msg.edit_text("❌ No playlists found in database!")
             return
-        
+
         # Create output file with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = f"extracted_tracks_{timestamp}.txt"
-        
+
         total_playlists = len(playlists)
         total_tracks = 0
         processed = 0
-        
+
         await status_msg.edit_text(f"🎵 **Extracting from {total_playlists} playlists**\n⏳ Processing...")
-        
+
         with open(output_file, 'w') as f:
             for i, playlist_data in enumerate(playlists):
                 processed += 1
                 playlist_url = playlist_data.get('url', '')
                 playlist_id = extract_spotify_id(playlist_url)
-                
+
                 if not playlist_id:
                     logger.warning(f"Could not extract ID from URL: {playlist_url}")
                     continue
-                
+
                 # Extract tracks
                 tracks = await extract_playlist_tracks(spotify_client, playlist_id)
-                
+
                 if tracks:
                     # Write tracks to file
                     for track_id in tracks:
                         f.write(f"{track_id}\n")
-                    
+
                     total_tracks += len(tracks)
                     logger.info(f"✅ Extracted {len(tracks)} tracks from playlist {playlist_id}")
                 else:
                     logger.warning(f"❌ No tracks extracted from playlist {playlist_id}")
-                
-                # Update progress every 10 playlists
-                if processed % 10 == 0:
+
+                # Update progress every 20 playlists
+                if processed % 20 == 0:
                     progress = (processed / total_playlists) * 100
-                    await status_msg.edit_text(
-                        f"🎵 **Track Extraction Progress**\n"
-                        f"📊 {processed}/{total_playlists} playlists ({progress:.1f}%)\n"
-                        f"🎶 {total_tracks} tracks extracted\n"
-                        f"📁 Saving to: `{output_file}`"
-                    )
-                
+                    try:
+                        await status_msg.edit_text(
+                            f"🎵 **Track Extraction Progress**\n"
+                            f"📊 {processed}/{total_playlists} playlists ({progress:.1f}%)\n"
+                            f"🎶 {total_tracks} tracks extracted\n"
+                            f"📁 Saving to: `{output_file}`"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to update status: {e}")
+
                 # Small delay to prevent overwhelming
                 await asyncio.sleep(0.1)
-        
+
         # Final status
         await status_msg.edit_text(
             f"✅ **Extraction Complete!**\n"
@@ -134,7 +145,7 @@ async def extract_tracks_command(client: Client, message: Message):
             f"📁 Saved to: `{output_file}`\n"
             f"⏱️ Client used: `{manager.get_current_client_id()[:8]}...`"
         )
-        
+
         # Log completion to Telegram
         await manager._log_to_telegram(
             f"✅ **Track Extraction Completed**\n"
@@ -142,16 +153,15 @@ async def extract_tracks_command(client: Client, message: Message):
             f"🎶 {total_tracks} tracks extracted\n"
             f"📁 File: {output_file}"
         )
-        
+
+        # Send the file to user
+        if os.path.exists(output_file):
+            await message.reply_document(output_file, caption=f"✅ Extracted {total_tracks} tracks from {processed} playlists")
+            os.remove(output_file)
+
     except Exception as e:
         logger.error(f"Extraction failed: {e}")
         await message.reply(f"❌ **Extraction Failed**\n`{str(e)}`")
-
-def extract_user_id(url):
-    match = re.search(r"spotify\.com/user/([a-zA-Z0-9]+)", url)
-    if match:
-        return match.group(1)
-    return None
 
 @Client.on_message(filters.command("ur"))
 async def user_tracks_split(client, message):
@@ -175,7 +185,7 @@ async def user_tracks_split(client, message):
         status = await message.reply(f"⏳ Fetching playlists for `{user_id}`...")
 
         playlists = await sp.user_playlists(user_id)
-        if not playlists['items']:
+        if not playlists or not playlists.get('items'):
             await status.edit("⚠️ No public playlists found for this user.")
             return
 
@@ -195,41 +205,35 @@ async def user_tracks_split(client, message):
                     f"🎵 Tracks so far: {total_tracks}"
                 )
 
-                tracks = await sp.playlist_tracks(pid)
+                # Get tracks from this playlist
+                tracks = await extract_playlist_tracks(sp, pid)
+                all_ids.extend(tracks)
+                total_tracks += len(tracks)
 
-                while tracks:
-                    for item in tracks['items']:
-                        track = item['track']
-                        if track:
-                            tid = track['id']
-                            all_ids.append(tid)
-                            total_tracks += 1
-
-                            if total_tracks % 200 == 0:
-                                await status.edit(
-                                    f"📦 Still fetching...\n"
-                                    f"✅ Playlists done: {total_playlists}\n"
-                                    f"🎵 Tracks so far: {total_tracks}"
-                                )
-
-                    if tracks.get('next'):
-                        tracks = await sp.next(tracks)
-                    else:
-                        tracks = None
+                await asyncio.sleep(0.2)
 
             if playlists.get('next'):
                 playlists = await sp.next(playlists)
             else:
-                playlists = None
+                break
 
-        # Split into chunks of 5000
-        chunk_size = 5000
-        chunks = [all_ids[i:i + chunk_size] for i in range(0, len(all_ids), chunk_size)]
+        if not all_ids:
+            await status.edit("⚠️ No tracks found in user's playlists.")
+            return
+
+        # Remove duplicates
+        unique_ids = list(set(all_ids))
+
+        # Split into chunks of 10000
+        chunk_size = 10000
+        chunks = [unique_ids[i:i + chunk_size] for i in range(0, len(unique_ids), chunk_size)]
 
         part_number = 1
         for chunk in chunks:
-            file_name = f"{user_id}_tracks_part{part_number}.txt"
-            with open(file_name, "w", encoding="utf-8") as f:
+            timestamp = int(time.time())
+            file_name = f"{user_id}_tracks_part_{part_number}_{timestamp}.txt"
+
+            with open(file_name, 'w') as f:
                 for tid in chunk:
                     f.write(f"{tid}\n")
 
@@ -238,6 +242,7 @@ async def user_tracks_split(client, message):
                 document=file_name,
                 caption=f"✅ `{user_id}` | Part {part_number} | {len(chunk)} track IDs"
             )
+            os.remove(file_name)
             part_number += 1
 
         await status.edit(
@@ -246,7 +251,6 @@ async def user_tracks_split(client, message):
 
     except Exception as e:
         await status.edit(f"❌ Error: `{e}`")
-
 
 @Client.on_message(filters.command("user"))
 async def usernn_count(client, message):
@@ -268,7 +272,7 @@ async def usernn_count(client, message):
         sp = await manager.get_spotify_client()
 
         playlists = await sp.user_playlists(user_id)
-        if not playlists['items']:
+        if not playlists or not playlists.get('items'):
             await message.reply("⚠️ No public playlists found for this user.")
             return
 
@@ -278,23 +282,23 @@ async def usernn_count(client, message):
         while playlists:
             for playlist in playlists['items']:
                 total_playlists += 1
-                total_tracks += playlist['tracks']['total']
+                tracks_info = playlist.get('tracks', {})
+                track_count = tracks_info.get('total', 0)
+                total_tracks += track_count
+
             if playlists.get('next'):
                 playlists = await sp.next(playlists)
             else:
-                playlists = None
+                break
 
         await message.reply(
-            f"👤 **User:** `{user_id}`\n"
-            f"📚 **Total Playlists:** {total_playlists}\n"
-            f"🎵 **Total Tracks in All Playlists:** {total_tracks}"
+            f"📊 **User Stats for `{user_id}`**\n"
+            f"📁 Total Playlists: `{total_playlists}`\n"
+            f"🎵 Total Tracks: `{total_tracks}`"
         )
 
     except Exception as e:
         await message.reply(f"❌ Error: `{e}`")
-
-
-
 
 @Client.on_message(filters.command("allartists"))
 async def get_all_indian_artists(client, message):
@@ -340,40 +344,6 @@ async def get_all_indian_artists(client, message):
 
     except Exception as e:
         await message.reply(f"❌ Error: `{e}`")
-
-
-import asyncio
-import re
-from pyrogram import Client, filters
-from spotipy import SpotifyException
-
-
-
-def extract_artist_id(artist_url):
-    match = re.search(r"artist/([a-zA-Z0-9]+)", artist_url)
-    return match.group(1) if match else None
-
-
-async def safe_spotify_call(func, *args, **kwargs):
-    while True:
-        try:
-            return func(*args, **kwargs)
-        except SpotifyException as e:
-            if e.http_status == 429:
-                retry_after = int(e.headers.get("Retry-After", 5))
-                logger.warning(f"🔁 429 Error. Retrying after {retry_after}s...")
-                await asyncio.sleep(retry_after + 1)
-            else:
-                raise
-
-PROGRESS_FILE = "progress.json"
-
-import os
-import time
-import json
-import re
-import asyncio
-
 
 @Client.on_message(filters.command("sa") & filters.private & filters.reply)
 async def artist_bulk_tracks(client, message: Message):

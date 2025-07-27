@@ -149,12 +149,12 @@ class AdvancedSpotifyManager:
         # Check if we have any valid clients left
         valid_clients = [cid for cid, stats in self.client_stats.items() 
                         if stats['status'] not in ['invalid', 'rate_limited']]
-        
+
         if not valid_clients:
             await self._log_to_telegram("❌ All clients are either invalid or rate-limited. Script stopped.")
         else:
             await self._log_to_telegram("❌ All valid clients are rate-limited. Script stopped.")
-        
+
         return False
 
     async def switch_to_client(self, target_client_id: str) -> bool:
@@ -175,7 +175,7 @@ class AdvancedSpotifyManager:
         status_lines = []
         for client_id, stats in self.client_stats.items():
             short_id = client_id[:8]
-            
+
             if stats['status'] == 'active':
                 emoji = "🟢"
                 status_text = f"{stats['requests']} requests"
@@ -219,8 +219,13 @@ class SpotifyClientWrapper:
 
                 if response.status == 429:
                     # Rate limited - switch client
+                    retry_after = int(response.headers.get('Retry-After', 30))
                     stats['status'] = 'rate_limited'
-                    await self.manager._log_to_telegram(f"❌ Client `{self.client_id[:8]}...` hit rate limit")
+                    await self.manager._log_to_telegram(f"❌ Client `{self.client_id[:8]}...` hit rate limit, waiting {retry_after}s")
+
+                    # Wait before switching
+                    await asyncio.sleep(min(retry_after, 5))  # Cap wait time
+
                     await self.manager._switch_to_next_client()
                     # Get new client and retry
                     new_client = await self.manager.get_spotify_client()
