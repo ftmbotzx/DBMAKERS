@@ -56,7 +56,7 @@ class AdvancedSpotifyManager:
         try:
             with open(self.token_cache_file, 'r') as f:
                 cache_data = json.load(f)
-                
+
             for client_id, cache_info in cache_data.items():
                 if client_id in self.client_stats:
                     # Only load if not expired
@@ -64,7 +64,7 @@ class AdvancedSpotifyManager:
                         self.client_stats[client_id]['token'] = cache_info.get('token')
                         self.client_stats[client_id]['token_expiry'] = cache_info.get('token_expiry')
                         logger.info(f"Loaded cached token for client {client_id[:8]}...")
-                        
+
         except (FileNotFoundError, json.JSONDecodeError, Exception) as e:
             logger.info(f"Could not load token cache: {e}")
 
@@ -78,10 +78,10 @@ class AdvancedSpotifyManager:
                         'token': stats['token'],
                         'token_expiry': stats['token_expiry']
                     }
-            
+
             with open(self.token_cache_file, 'w') as f:
                 json.dump(cache_data, f, indent=2)
-                
+
         except Exception as e:
             logger.error(f"Could not save token cache: {e}")
 
@@ -175,7 +175,7 @@ class AdvancedSpotifyManager:
         """Switch to the next available client"""
         original_index = self.current_client_index
         attempts = 0
-        
+
         # First, try to find an immediately available client
         for _ in range(len(self.clients)):
             attempts += 1
@@ -193,12 +193,12 @@ class AdvancedSpotifyManager:
         # If no immediately available clients, try to reset rate-limited ones after some time
         rate_limited_clients = [cid for cid, stats in self.client_stats.items() 
                                if stats['status'] == 'rate_limited']
-        
+
         if rate_limited_clients:
             # Reset the first rate-limited client to give it another chance
             first_rate_limited = rate_limited_clients[0]
             self.client_stats[first_rate_limited]['status'] = 'active'
-            
+
             # Find and switch to this client
             for i, client in enumerate(self.clients):
                 if client['client_id'] == first_rate_limited:
@@ -288,49 +288,53 @@ class SpotifyClientWrapper:
                         stats['status'] = 'rate_limited'
                         await self.manager._log_to_telegram(f"❌ Client `{self.client_id[:8]}...` hit rate limit (retry {retry_count + 1})")
 
+                        # Add small delay before switching to prevent aggressive requests
+                        await asyncio.sleep(1)
+
                         # Immediate client switch without waiting
                         switch_success = await self.manager._switch_to_next_client()
                         if switch_success:
-                            # Get new client and retry
+                            # Get new client and retry with delay
+                            await asyncio.sleep(0.5)  # Small delay before retry
                             new_client = await self.manager.get_spotify_client()
                             return await new_client._make_request(url, params, retry_count + 1)
                         else:
                             # Wait a bit and retry with same client
-                            await asyncio.sleep(min(retry_after, 5))
+                            await asyncio.sleep(min(retry_after, 10))
                             return await self._make_request(url, params, retry_count + 1)
-                    
+
                     elif response.status == 401:
                         # Token expired, get new token
                         await self.manager._log_to_telegram(f"🔄 Token expired for `{self.client_id[:8]}...`, refreshing")
                         stats['token'] = None
                         stats['token_expiry'] = 0
-                        
+
                         # Get fresh client and retry
                         new_client = await self.manager.get_spotify_client()
                         return await new_client._make_request(url, params, retry_count + 1)
-                    
+
                     elif response.status == 200:
                         return await response.json()
                     else:
                         logger.error(f"Spotify API error {response.status} for client {self.client_id[:8]}...")
                         error_text = await response.text()
                         logger.error(f"Response: {error_text}")
-                        
+
                         # Try switching client for server errors
                         if response.status >= 500:
                             await self.manager._switch_to_next_client()
                             new_client = await self.manager.get_spotify_client()
                             return await new_client._make_request(url, params, retry_count + 1)
-                        
+
                         return None
-        
+
         except asyncio.TimeoutError:
             logger.error(f"Timeout for client {self.client_id[:8]}...")
             # Try switching client on timeout
             await self.manager._switch_to_next_client()
             new_client = await self.manager.get_spotify_client()
             return await new_client._make_request(url, params, retry_count + 1)
-        
+
         except Exception as e:
             logger.error(f"Request error for client {self.client_id[:8]}...: {e}")
             return None
